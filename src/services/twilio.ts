@@ -37,7 +37,7 @@ export const startTwilioVerify = async (to: string): Promise<VerifyResponse> => 
       }
     );
 
-    const data = await response.json();
+    const data: any = await response.json();
 
     if (response.ok) {
       console.log(`[Twilio Verify Start] Verification sent to ${targetPhone}. Status: ${data.status}`);
@@ -75,7 +75,7 @@ export const checkTwilioVerify = async (to: string, code: string): Promise<Verif
       }
     );
 
-    const data = await response.json();
+    const data: any = await response.json();
 
     if (response.ok && data.status === 'approved') {
       console.log(`[Twilio Verify Success] Code verified for ${targetPhone}.`);
