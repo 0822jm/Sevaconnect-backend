@@ -76,4 +76,14 @@ router.get('/:id/activity', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/societies/:id/bookings
+router.get('/:id/bookings', async (req: Request, res: Response) => {
+  try {
+    const bookings = await db.getBookingsBySociety(req.params.id);
+    res.json(bookings);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;
