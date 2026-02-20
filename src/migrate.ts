@@ -39,20 +39,30 @@ async function migrate() {
   console.log('✓ Created society_services table');
 
   // Step 3: Migrate existing society-override service rows → society_services
-  const overrides = await sql(`SELECT * FROM services WHERE society_id IS NOT NULL`, []);
+  // Guard: only run if society_id column still exists (skipped if DB is already clean)
+  const hasSocietyId = await sql(
+    `SELECT COUNT(*) AS cnt FROM information_schema.columns
+     WHERE table_name = 'services' AND column_name = 'society_id' AND table_schema = 'public'`,
+    []
+  );
   const idMap: Record<string, string> = {}; // old service.id → new society_services.id
 
-  for (const svc of overrides) {
-    const newId = generateId('ss');
-    idMap[svc.id] = newId;
-    await sql(
-      `INSERT INTO society_services (id, society_id, service_id, price, is_active)
-       VALUES ($1, $2, $3, $4, true)
-       ON CONFLICT (id) DO NOTHING`,
-      [newId, svc.society_id, svc.original_service_id, svc.society_price || null]
-    );
+  if (Number(hasSocietyId[0].cnt) > 0) {
+    const overrides = await sql(`SELECT * FROM services WHERE society_id IS NOT NULL`, []);
+    for (const svc of overrides) {
+      const newId = generateId('ss');
+      idMap[svc.id] = newId;
+      await sql(
+        `INSERT INTO society_services (id, society_id, service_id, price, is_active)
+         VALUES ($1, $2, $3, $4, true)
+         ON CONFLICT (id) DO NOTHING`,
+        [newId, svc.society_id, svc.original_service_id, svc.society_price || null]
+      );
+    }
+    console.log(`✓ Migrated ${overrides.length} society-override services to society_services`);
+  } else {
+    console.log('✓ No society_id column found — skipping legacy data migration (already clean)');
   }
-  console.log(`✓ Migrated ${overrides.length} society-override services to society_services`);
 
   // Step 4: Add new columns to bookings
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS society_service_id TEXT`, []);
@@ -120,8 +130,13 @@ async function migrate() {
   console.log('✓ Populated price_at_booking on all bookings');
 
   // Step 8: Delete society-override rows from services (now in society_services)
-  await sql(`DELETE FROM services WHERE society_id IS NOT NULL`, []);
-  console.log('✓ Removed society-override rows from services');
+  // Guard: only run if society_id column still exists
+  if (Number(hasSocietyId[0].cnt) > 0) {
+    await sql(`DELETE FROM services WHERE society_id IS NOT NULL`, []);
+    console.log('✓ Removed society-override rows from services');
+  } else {
+    console.log('✓ No society_id column — skipping delete (already clean)');
+  }
 
   // Step 9: Drop old columns from services
   await sql(`ALTER TABLE services DROP COLUMN IF EXISTS society_id`, []);
@@ -158,6 +173,32 @@ async function migrate() {
     END $$
   `, []);
   console.log('✓ society_services name/description → JSONB');
+
+  // Step 12: Fix double-wrapped JSONB values in services
+  // Caused by inserting JSON strings into a TEXT column before migration ran.
+  // Detects {"en": "{\"en\": \"Cooking\"}"} and unwraps to {"en": "Cooking"}.
+  await sql(`
+    UPDATE services
+    SET
+      name = (name->>'en')::jsonb,
+      description = CASE
+        WHEN (description->>'en') ~ '^[{\\[]' THEN (description->>'en')::jsonb
+        ELSE description
+      END
+    WHERE (name->>'en') ~ '^[{\\[]'
+  `, []);
+  console.log('✓ Fixed double-wrapped name/description in services');
+
+  await sql(`
+    UPDATE society_services
+    SET
+      name = CASE WHEN name IS NOT NULL AND (name->>'en') ~ '^[{\\[]' THEN (name->>'en')::jsonb ELSE name END,
+      description = CASE WHEN description IS NOT NULL AND (description->>'en') ~ '^[{\\[]' THEN (description->>'en')::jsonb ELSE description END
+    WHERE
+      (name IS NOT NULL AND (name->>'en') ~ '^[{\\[]')
+      OR (description IS NOT NULL AND (description->>'en') ~ '^[{\\[]')
+  `, []);
+  console.log('✓ Fixed double-wrapped name/description in society_services');
 
   console.log('\n=== Migration complete! ===');
 }

@@ -27,7 +27,14 @@ export type LocalizedString = { [locale: string]: string };
 
 const parseLocalized = (value: any): LocalizedString => {
   if (!value) return { en: '' };
-  if (typeof value === 'string') return { en: value };
+  if (typeof value === 'string') {
+    // Neon's parameterized SQL may return JSONB columns as JSON strings
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object') return parsed as LocalizedString;
+    } catch {}
+    return { en: value };
+  }
   if (typeof value === 'object') return value as LocalizedString;
   return { en: String(value) };
 };
@@ -473,12 +480,12 @@ export const db = {
 
   // ─── Services (Global Catalogue) ───
   getServices: async (): Promise<Service[]> => {
-    const rows = await sql`SELECT * FROM services WHERE is_active = true ORDER BY (name->>'en') ASC`;
+    const rows = await sql`SELECT * FROM services WHERE is_active = true ORDER BY name::text ASC`;
     return rows.map(mapService);
   },
 
   getAllServices: async (): Promise<Service[]> => {
-    const rows = await sql`SELECT * FROM services ORDER BY (name->>'en') ASC`;
+    const rows = await sql`SELECT * FROM services ORDER BY name::text ASC`;
     return rows.map(mapService);
   },
 
