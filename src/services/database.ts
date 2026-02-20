@@ -22,6 +22,16 @@ const sql: any = (...args: any[]) => {
   return (instance as any)(...args);
 };
 
+// ── Localised string helper ──
+export type LocalizedString = { [locale: string]: string };
+
+const parseLocalized = (value: any): LocalizedString => {
+  if (!value) return { en: '' };
+  if (typeof value === 'string') return { en: value };
+  if (typeof value === 'object') return value as LocalizedString;
+  return { en: String(value) };
+};
+
 // ── Type Interfaces ──
 
 export enum UserRole {
@@ -60,20 +70,34 @@ export interface User {
 
 export interface Service {
   id: string;
-  name: string;
-  description: string;
+  name: LocalizedString;
+  description: LocalizedString;
   basePrice: number;
-  societyPrice?: number;
-  societyId?: string;
-  originalServiceId?: string;
   durationMinutes: number;
   icon: string;
-  isGeneric?: boolean;
+  isGeneric: boolean;
+  isActive: boolean;
+}
+
+export interface SocietyService {
+  id: string;              // society_services.id
+  societyId: string;
+  serviceId?: string;      // undefined for exclusive services
+  name: LocalizedString;   // effective (coalesced with global)
+  description: LocalizedString;
+  effectivePrice: number;  // coalesced price
+  basePrice?: number;      // global base price (undefined for exclusive)
+  priceOverride?: number;  // set only if society explicitly overrode price
+  durationMinutes: number;
+  icon: string;
+  isGeneric: boolean;
+  isActive: boolean;
+  isExclusive: boolean;    // true when serviceId is null
 }
 
 export interface Booking {
   id: string;
-  serviceId: string;
+  societyServiceId: string;
   householdId: string;
   maidId: string;
   date: string;
@@ -90,11 +114,12 @@ export interface Booking {
   isReviewed?: boolean;
   customPrice?: number;
   customDescription?: string;
+  priceAtBooking?: number;
+  serviceName?: LocalizedString;
   maidName?: string;
   householdName?: string;
   householdAddress?: string;
   householdPhone?: string;
-  serviceBasePrice?: number;
 }
 
 export interface ChatMessage {
@@ -139,37 +164,57 @@ const mapUser = (row: any): User => ({
 });
 
 const mapService = (row: any): Service => ({
-  ...row,
+  id: row.id,
+  name: parseLocalized(row.name),
+  description: parseLocalized(row.description),
   basePrice: Number(row.base_price),
-  societyPrice: row.society_price ? Number(row.society_price) : undefined,
-  societyId: row.society_id,
-  originalServiceId: row.original_service_id,
-  durationMinutes: row.duration_minutes,
+  durationMinutes: Number(row.duration_minutes),
+  icon: row.icon,
   isGeneric: row.is_generic || false,
+  isActive: row.is_active ?? true,
+});
+
+const mapSocietyService = (row: any): SocietyService => ({
+  id: row.id,
+  societyId: row.society_id,
+  serviceId: row.service_id || undefined,
+  name: parseLocalized(row.name),
+  description: parseLocalized(row.description),
+  effectivePrice: Number(row.effective_price ?? 0),
+  basePrice: row.base_price != null ? Number(row.base_price) : undefined,
+  priceOverride: row.price_override != null ? Number(row.price_override) : undefined,
+  durationMinutes: Number(row.duration_minutes ?? 0),
+  icon: row.icon,
+  isGeneric: row.is_generic || false,
+  isActive: row.is_active ?? true,
+  isExclusive: !row.service_id,
 });
 
 const mapBooking = (row: any): Booking => ({
-  ...row,
   id: row.id,
-  serviceId: row.service_id,
+  societyServiceId: row.society_service_id,
   householdId: row.household_id,
   maidId: row.maid_id,
+  date: row.date,
   startTime: row.start_time,
   endTime: row.end_time,
+  status: row.status,
   startOtp: row.start_otp,
   endOtp: row.end_otp,
   maidRequestedStart: row.maid_requested_start,
   maidRequestedEnd: row.maid_requested_end,
   isRecurring: row.is_recurring,
+  frequency: row.frequency,
   customFrequencyDays: row.custom_frequency_days,
   isReviewed: row.is_reviewed,
   customPrice: row.custom_price ? Number(row.custom_price) : undefined,
   customDescription: row.custom_description,
+  priceAtBooking: row.price_at_booking ? Number(row.price_at_booking) : undefined,
+  serviceName: row.service_name ? parseLocalized(row.service_name) : undefined,
   maidName: row.maid_name,
   householdName: row.household_name,
   householdAddress: row.household_address,
   householdPhone: row.household_phone,
-  serviceBasePrice: row.service_base_price ? Number(row.service_base_price) : undefined,
 });
 
 const mapMessage = (row: any): ChatMessage => ({
@@ -426,21 +471,15 @@ export const db = {
     return { socId, adminId, initialPassword };
   },
 
-  // ─── Services ───
-  getServices: async (societyId?: string): Promise<Service[]> => {
-    const globalRows = await sql`SELECT * FROM services WHERE society_id IS NULL`;
-    const globalServices = globalRows.map(mapService);
-    let societyServices: Service[] = [];
-    if (societyId) {
-      const societyRows = await sql`SELECT * FROM services WHERE society_id = ${societyId}`;
-      societyServices = societyRows.map(mapService);
-    }
-    const mergedServices = globalServices.reduce((acc: Service[], globalSrv) => {
-      const override = societyServices.find((s) => s.originalServiceId === globalSrv.id);
-      if (override) return acc;
-      return [...acc, globalSrv];
-    }, []);
-    return [...mergedServices, ...societyServices];
+  // ─── Services (Global Catalogue) ───
+  getServices: async (): Promise<Service[]> => {
+    const rows = await sql`SELECT * FROM services WHERE is_active = true ORDER BY (name->>'en') ASC`;
+    return rows.map(mapService);
+  },
+
+  getAllServices: async (): Promise<Service[]> => {
+    const rows = await sql`SELECT * FROM services ORDER BY (name->>'en') ASC`;
+    return rows.map(mapService);
   },
 
   getServiceById: async (id: string): Promise<Service | null> => {
@@ -450,19 +489,137 @@ export const db = {
 
   addService: async (service: any): Promise<Service> => {
     const id = generateId('srv');
-    await sql`INSERT INTO services (id, name, description, base_price, society_id, duration_minutes, icon, is_generic) VALUES (${id}, ${service.name}, ${service.description}, ${service.basePrice}, ${service.societyId || null}, ${service.durationMinutes}, ${service.icon}, ${service.isGeneric || false})`;
-    return { ...service, id } as Service;
+    const name = typeof service.name === 'string' ? { en: service.name } : (service.name || { en: '' });
+    const description = typeof service.description === 'string' ? { en: service.description } : (service.description || { en: '' });
+    await (sql as any)(
+      `INSERT INTO services (id, name, description, base_price, duration_minutes, icon, is_generic, is_active)
+       VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7, true)`,
+      [id, JSON.stringify(name), JSON.stringify(description), service.basePrice, service.durationMinutes, service.icon, service.isGeneric || false]
+    );
+    return (await db.getServiceById(id))!;
   },
 
-  updateService: async (id: string, updates: any): Promise<any> => {
-    const entries = Object.entries(updates).filter(([_, v]) => v !== undefined);
-    const fields = entries.map(([key, _], i) => `${key.replace(/[A-Z]/g, (l: string) => `_${l.toLowerCase()}`)} = $${i + 2}`);
-    await (sql as any)(`UPDATE services SET ${fields.join(', ')} WHERE id = $1`, [id, ...entries.map(([_, v]) => v)]);
-    return { id, ...updates };
+  updateService: async (id: string, updates: any): Promise<Service> => {
+    const colMap: Record<string, string> = {
+      name: 'name', description: 'description', basePrice: 'base_price',
+      durationMinutes: 'duration_minutes', icon: 'icon', isGeneric: 'is_generic', isActive: 'is_active',
+    };
+    const entries = Object.entries(updates).filter(([key, v]) => v !== undefined && colMap[key]);
+    if (entries.length > 0) {
+      const jsonbCols = new Set(['name', 'description']);
+      const fields = entries.map(([key, _], i) => {
+        const col = colMap[key];
+        return jsonbCols.has(key) ? `${col} = $${i + 2}::jsonb` : `${col} = $${i + 2}`;
+      }).join(', ');
+      const values = entries.map(([key, v]) =>
+        (key === 'name' || key === 'description')
+          ? JSON.stringify(typeof v === 'string' ? { en: v } : v)
+          : v
+      );
+      await (sql as any)(`UPDATE services SET ${fields} WHERE id = $1`, [id, ...values]);
+    }
+    return (await db.getServiceById(id))!;
   },
 
   deleteService: async (id: string): Promise<void> => {
     await sql`DELETE FROM services WHERE id = ${id}`;
+  },
+
+  // ─── Society Services (Per-Society Offerings) ───
+  getSocietyServices: async (societyId: string): Promise<SocietyService[]> => {
+    const rows = await (sql as any)(
+      `SELECT
+        ss.id, ss.society_id, ss.service_id,
+        COALESCE(ss.name, s.name)               AS name,
+        COALESCE(ss.description, s.description) AS description,
+        COALESCE(ss.price, s.base_price)        AS effective_price,
+        s.base_price                            AS base_price,
+        ss.price                                AS price_override,
+        COALESCE(ss.duration, s.duration_minutes) AS duration_minutes,
+        COALESCE(ss.icon, s.icon)              AS icon,
+        COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
+        ss.is_active
+       FROM society_services ss
+       LEFT JOIN services s ON ss.service_id = s.id
+       WHERE ss.society_id = $1
+       ORDER BY ss.created_at ASC`,
+      [societyId]
+    );
+    return rows.map(mapSocietyService);
+  },
+
+  getSocietyServiceById: async (id: string): Promise<SocietyService | null> => {
+    const rows = await (sql as any)(
+      `SELECT
+        ss.id, ss.society_id, ss.service_id,
+        COALESCE(ss.name, s.name)               AS name,
+        COALESCE(ss.description, s.description) AS description,
+        COALESCE(ss.price, s.base_price)        AS effective_price,
+        s.base_price                            AS base_price,
+        ss.price                                AS price_override,
+        COALESCE(ss.duration, s.duration_minutes) AS duration_minutes,
+        COALESCE(ss.icon, s.icon)              AS icon,
+        COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
+        ss.is_active
+       FROM society_services ss
+       LEFT JOIN services s ON ss.service_id = s.id
+       WHERE ss.id = $1`,
+      [id]
+    );
+    return rows.length > 0 ? mapSocietyService(rows[0]) : null;
+  },
+
+  addSocietyService: async (data: {
+    societyId: string; serviceId?: string;
+    name?: LocalizedString | string | null; description?: LocalizedString | string | null;
+    price?: number; duration?: number; icon?: string; isGeneric?: boolean;
+  }): Promise<SocietyService> => {
+    const id = generateId('ss');
+    const nameJson = data.name
+      ? JSON.stringify(typeof data.name === 'string' ? { en: data.name } : data.name)
+      : null;
+    const descJson = data.description
+      ? JSON.stringify(typeof data.description === 'string' ? { en: data.description } : data.description)
+      : null;
+    await (sql as any)(
+      `INSERT INTO society_services (id, society_id, service_id, name, description, price, duration, icon, is_generic, is_active)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, true)`,
+      [id, data.societyId, data.serviceId || null, nameJson, descJson,
+       data.price ?? null, data.duration ?? null, data.icon || null, data.isGeneric ?? null]
+    );
+    return (await db.getSocietyServiceById(id))!;
+  },
+
+  updateSocietyService: async (id: string, updates: {
+    name?: LocalizedString | string | null; description?: LocalizedString | string | null;
+    price?: number | null; duration?: number | null;
+    icon?: string | null; isGeneric?: boolean | null; isActive?: boolean;
+  }): Promise<SocietyService> => {
+    const colMap: Record<string, string> = {
+      name: 'name', description: 'description', price: 'price',
+      duration: 'duration', icon: 'icon', isGeneric: 'is_generic', isActive: 'is_active',
+    };
+    const jsonbCols = new Set(['name', 'description']);
+    const entries = Object.entries(updates).filter(([key, _]) => key in colMap);
+    if (entries.length > 0) {
+      const fields = entries.map(([key, _], i) =>
+        jsonbCols.has(key) ? `${colMap[key]} = $${i + 2}::jsonb` : `${colMap[key]} = $${i + 2}`
+      ).join(', ');
+      const values = entries.map(([key, v]) => {
+        if (!jsonbCols.has(key)) return v;
+        if (v == null) return null;
+        return JSON.stringify(typeof v === 'string' ? { en: v } : v);
+      });
+      await (sql as any)(
+        `UPDATE society_services SET ${fields} WHERE id = $1`,
+        [id, ...values]
+      );
+    }
+    return (await db.getSocietyServiceById(id))!;
+  },
+
+  deleteSocietyService: async (id: string): Promise<void> => {
+    await sql`UPDATE society_services SET is_active = false WHERE id = ${id}`;
   },
 
   // ─── Bookings ───
@@ -470,17 +627,20 @@ export const db = {
     const fieldName = role === UserRole.MAID ? 'maid_id' : 'household_id';
     const rows = await (sql as any)(
       `SELECT
-        b.id, b.service_id, b.household_id, b.maid_id, b.date, b.start_time, b.end_time,
+        b.id, b.society_service_id, b.household_id, b.maid_id, b.date, b.start_time, b.end_time,
         b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
         b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
-        b.custom_price, b.custom_description,
+        b.custom_price, b.custom_description, b.price_at_booking,
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
-        h.phone as household_phone
+        h.phone as household_phone,
+        COALESCE(ss.name, svc.name) as service_name
       FROM bookings b
       JOIN users m ON b.maid_id = m.id
       JOIN users h ON b.household_id = h.id
+      LEFT JOIN society_services ss ON b.society_service_id = ss.id
+      LEFT JOIN services svc ON ss.service_id = svc.id
       WHERE b.${fieldName} = $1
       ORDER BY b.date DESC, b.start_time DESC`,
       [userId]
@@ -491,15 +651,19 @@ export const db = {
   getBookingsBySociety: async (societyId: string): Promise<Booking[]> => {
     const rows = await (sql as any)(
       `SELECT
-        b.*,
+        b.id, b.society_service_id, b.household_id, b.maid_id, b.date, b.start_time, b.end_time,
+        b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
+        b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
+        b.custom_price, b.custom_description, b.price_at_booking,
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
-        srv.base_price as service_base_price
+        COALESCE(ss.name, svc.name) as service_name
       FROM bookings b
       JOIN users m ON b.maid_id = m.id
       JOIN users h ON b.household_id = h.id
-      LEFT JOIN services srv ON b.service_id = srv.id
+      LEFT JOIN society_services ss ON b.society_service_id = ss.id
+      LEFT JOIN services svc ON ss.service_id = svc.id
       WHERE h.society_id = $1
       ORDER BY b.date DESC, b.start_time DESC`,
       [societyId]
@@ -509,7 +673,18 @@ export const db = {
 
   createBooking: async (booking: any): Promise<Booking> => {
     const id = generateId('bk');
-    await sql`INSERT INTO bookings (id, service_id, household_id, maid_id, date, start_time, end_time, status, start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed, custom_price, custom_description, maid_requested_start, maid_requested_end) VALUES (${id}, ${booking.serviceId}, ${booking.householdId}, ${booking.maidId}, ${booking.date}, ${booking.startTime}, ${booking.endTime}, ${BookingStatus.REQUESTED}, null, null, ${booking.isRecurring || false}, ${booking.frequency || null}, ${booking.customFrequencyDays || null}, false, ${booking.customPrice || null}, ${booking.customDescription || null}, false, false)`;
+    await sql`INSERT INTO bookings (
+      id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
+      start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
+      custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking
+    ) VALUES (
+      ${id}, ${booking.societyServiceId}, ${booking.householdId}, ${booking.maidId},
+      ${booking.date}, ${booking.startTime}, ${booking.endTime}, ${BookingStatus.REQUESTED},
+      null, null, ${booking.isRecurring || false}, ${booking.frequency || null},
+      ${booking.customFrequencyDays || null}, false,
+      ${booking.customPrice || null}, ${booking.customDescription || null}, false, false,
+      ${booking.priceAtBooking || null}
+    )`;
     return { ...booking, id, status: BookingStatus.REQUESTED, isReviewed: false } as Booking;
   },
 

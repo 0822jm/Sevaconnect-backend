@@ -5,11 +5,12 @@ import { authMiddleware } from '../middleware/auth';
 const router = Router();
 router.use(authMiddleware);
 
-// GET /api/services
+// GET /api/services — global catalogue; pass ?all=true to include inactive
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const societyId = req.query.societyId as string | undefined;
-    const services = await db.getServices(societyId);
+    const services = req.query.all === 'true'
+      ? await db.getAllServices()
+      : await db.getServices();
     res.json(services);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
