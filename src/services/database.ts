@@ -123,6 +123,7 @@ export interface Booking {
   customDescription?: string;
   priceAtBooking?: number;
   serviceName?: LocalizedString;
+  serviceIcon?: string;
   maidName?: string;
   householdName?: string;
   householdAddress?: string;
@@ -218,6 +219,7 @@ const mapBooking = (row: any): Booking => ({
   customDescription: row.custom_description,
   priceAtBooking: row.price_at_booking ? Number(row.price_at_booking) : undefined,
   serviceName: row.service_name ? parseLocalized(row.service_name) : undefined,
+  serviceIcon: row.service_icon || undefined,
   maidName: row.maid_name,
   householdName: row.household_name,
   householdAddress: row.household_address,
@@ -642,7 +644,8 @@ export const db = {
         h.name as household_name,
         h.address as household_address,
         h.phone as household_phone,
-        COALESCE(ss.name, svc.name) as service_name
+        COALESCE(ss.name, svc.name) as service_name,
+        COALESCE(ss.icon, svc.icon) as service_icon
       FROM bookings b
       JOIN users m ON b.maid_id = m.id
       JOIN users h ON b.household_id = h.id
@@ -665,7 +668,8 @@ export const db = {
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
-        COALESCE(ss.name, svc.name) as service_name
+        COALESCE(ss.name, svc.name) as service_name,
+        COALESCE(ss.icon, svc.icon) as service_icon
       FROM bookings b
       JOIN users m ON b.maid_id = m.id
       JOIN users h ON b.household_id = h.id
