@@ -403,21 +403,26 @@ export const db = {
   },
 
   getSocietyStats: async (societyId: string) => {
-    const todayStr = new Date().toISOString().split('T')[0];
     const userRows = await sql`SELECT role, is_verified FROM users WHERE society_id = ${societyId} AND role != 'SOCIETY_ADMIN'`;
     const bookingRows = await sql`
       SELECT COUNT(*) as count
       FROM bookings b
       JOIN users u ON b.household_id = u.id
       WHERE u.society_id = ${societyId}
-      AND b.date = ${todayStr}
-      AND b.status IN ('CONFIRMED', 'IN_PROGRESS')
     `;
 
+    const households = userRows.filter((u: any) => u.role === 'HOUSEHOLD');
+    const maids = userRows.filter((u: any) => u.role === 'MAID');
+    const verified = userRows.filter((u: any) => u.is_verified);
+    const pending = userRows.filter((u: any) => !u.is_verified);
+
     return {
-      totalUsers: userRows.length,
-      pendingVerifications: userRows.filter((u: any) => !u.is_verified).length,
-      activeBookingsToday: Number(bookingRows[0].count),
+      total_members: userRows.length,
+      verified_members: verified.length,
+      pending_members: pending.length,
+      household_count: households.length,
+      maid_count: maids.length,
+      booking_count: Number(bookingRows[0].count),
     };
   },
 
