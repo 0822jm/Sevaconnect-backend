@@ -86,4 +86,14 @@ router.get('/:id/bookings', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/societies/:id/reset-pin
+router.post('/:id/reset-pin', async (req: Request, res: Response) => {
+  try {
+    const result = await db.resetSocietyAdminPin(req.params.id);
+    res.json(result);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 export default router;

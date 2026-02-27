@@ -485,6 +485,23 @@ export const db = {
     return { socId, adminId, initialPassword };
   },
 
+  resetSocietyAdminPin: async (societyId: string): Promise<{ pin: string; phone: string }> => {
+    const rows = await sql`
+      SELECT id, phone, username FROM users
+      WHERE society_id = ${societyId} AND role = ${UserRole.SOCIETY_ADMIN}
+      LIMIT 1
+    `;
+    if (rows.length === 0) throw new Error('No society admin found for this society.');
+    const adminUser = rows[0];
+    const pin = Math.floor(100000 + Math.random() * 900000).toString();
+    const passwordHash = await hashPassword(pin);
+    await sql`
+      UPDATE users SET password_hash = ${passwordHash}, must_change_password = TRUE
+      WHERE id = ${adminUser.id}
+    `;
+    return { pin, phone: adminUser.phone || adminUser.username };
+  },
+
   // ─── Services (Global Catalogue) ───
   getServices: async (): Promise<Service[]> => {
     const rows = await sql`SELECT * FROM services WHERE is_active = true ORDER BY name::text ASC`;
