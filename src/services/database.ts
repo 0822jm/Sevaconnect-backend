@@ -73,6 +73,8 @@ export interface User {
   rating?: number;
   reviewCount?: number;
   leaves?: string[];
+  autoAccept?: boolean;
+  trustScore?: number;
 }
 
 export interface Service {
@@ -169,6 +171,8 @@ const mapUser = (row: any): User => ({
   leaves: row.leaves || [],
   address: row.address,
   mustChangePassword: row.must_change_password || false,
+  autoAccept: row.auto_accept ?? false,
+  trustScore: row.trust_score != null ? Number(row.trust_score) : null,
 });
 
 const mapService = (row: any): Service => ({
@@ -243,7 +247,19 @@ export const db = {
       SELECT
         u.*,
         (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) as computed_review_count,
-        (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) as computed_rating
+        (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) as computed_rating,
+        ROUND(COALESCE(
+          CASE
+            WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
+             AND (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED') = 0
+            THEN 50
+            ELSE
+              (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) / 5.0 * 60
+              + (1.0 - (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'CANCELLED')::float
+                      / GREATEST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED'), 1)) * 30
+              + LEAST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'COMPLETED')::float / 50.0, 1.0) * 10
+          END
+        , 50)) as trust_score
       FROM users u
       WHERE u.username = ${username} OR u.phone = ${username}
     `;
@@ -263,7 +279,19 @@ export const db = {
       SELECT
         u.*,
         (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) as computed_review_count,
-        (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) as computed_rating
+        (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) as computed_rating,
+        ROUND(COALESCE(
+          CASE
+            WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
+             AND (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED') = 0
+            THEN 50
+            ELSE
+              (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) / 5.0 * 60
+              + (1.0 - (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'CANCELLED')::float
+                      / GREATEST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED'), 1)) * 30
+              + LEAST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'COMPLETED')::float / 50.0, 1.0) * 10
+          END
+        , 50)) as trust_score
       FROM users u
       WHERE u.id = ${id}
     `;
@@ -334,6 +362,10 @@ export const db = {
 
   updateMaidSkills: async (id: string, skills: string[]): Promise<void> => {
     await sql`UPDATE users SET skills = ${skills} WHERE id = ${id}`;
+  },
+
+  updateAutoAccept: async (userId: string, enabled: boolean): Promise<void> => {
+    await sql`UPDATE users SET auto_accept = ${enabled} WHERE id = ${userId}`;
   },
 
   toggleLeave: async (id: string, date: string): Promise<string[]> => {
@@ -718,6 +750,14 @@ export const db = {
       ${booking.customPrice || null}, ${booking.customDescription || null}, false, false,
       ${booking.priceAtBooking || null}
     )`;
+
+    // Auto-accept: if the maid has opted in, immediately confirm the booking
+    const maidRows = await sql`SELECT auto_accept FROM users WHERE id = ${booking.maidId}`;
+    if (maidRows[0]?.auto_accept) {
+      await sql`UPDATE bookings SET status = ${BookingStatus.CONFIRMED} WHERE id = ${id}`;
+      return { ...booking, id, status: BookingStatus.CONFIRMED, isReviewed: false } as Booking;
+    }
+
     return { ...booking, id, status: BookingStatus.REQUESTED, isReviewed: false } as Booking;
   },
 

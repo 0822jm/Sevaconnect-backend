@@ -52,6 +52,21 @@ router.post('/:id/verify', async (req: Request, res: Response) => {
   }
 });
 
+// PUT /api/users/:id/auto-accept
+router.put('/:id/auto-accept', async (req: Request, res: Response) => {
+  try {
+    const { enabled } = req.body;
+    if (typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled must be a boolean' });
+      return;
+    }
+    await db.updateAutoAccept(req.params.id, enabled);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // PUT /api/users/:id/skills
 router.put('/:id/skills', async (req: Request, res: Response) => {
   try {

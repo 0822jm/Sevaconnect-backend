@@ -200,6 +200,10 @@ async function migrate() {
   `, []);
   console.log('✓ Fixed double-wrapped name/description in society_services');
 
+  // Step 13: Add auto_accept to users (opt-in to auto-confirming new bookings)
+  await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_accept BOOLEAN NOT NULL DEFAULT FALSE`, []);
+  console.log('✓ Added auto_accept to users');
+
   console.log('\n=== Migration complete! ===');
 }
 
