@@ -204,6 +204,10 @@ async function migrate() {
   await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_accept BOOLEAN NOT NULL DEFAULT FALSE`, []);
   console.log('✓ Added auto_accept to users');
 
+  // Step 14: Add preferred_maid_id to users (household's preferred helper)
+  await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_maid_id TEXT REFERENCES users(id) ON DELETE SET NULL`, []);
+  console.log('✓ Added preferred_maid_id to users');
+
   console.log('\n=== Migration complete! ===');
 }
 

@@ -173,6 +173,7 @@ const mapUser = (row: any): User => ({
   mustChangePassword: row.must_change_password || false,
   autoAccept: row.auto_accept ?? false,
   trustScore: row.trust_score != null ? Number(row.trust_score) : null,
+  preferredMaidId: row.preferred_maid_id || null,
 });
 
 const mapService = (row: any): Service => ({
