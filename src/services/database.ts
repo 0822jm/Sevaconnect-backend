@@ -402,7 +402,19 @@ export const db = {
       SELECT
         u.*,
         (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) as computed_review_count,
-        (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) as computed_rating
+        (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) as computed_rating,
+        ROUND(COALESCE(
+          CASE
+            WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
+             AND (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED') = 0
+            THEN 50
+            ELSE
+              (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) / 5.0 * 60
+              + (1.0 - (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'CANCELLED')::float
+                      / GREATEST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED'), 1)) * 30
+              + LEAST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'COMPLETED')::float / 50.0, 1.0) * 10
+          END
+        , 50)) as trust_score
       FROM users u
       WHERE u.society_id = ${societyId} AND u.role != 'SOCIETY_ADMIN'
     `;
