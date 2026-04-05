@@ -12,6 +12,7 @@ import societyServiceRoutes from './routes/societyServices';
 import bookingRoutes from './routes/bookings';
 import messageRoutes from './routes/messages';
 import reviewRoutes from './routes/reviews';
+import contractUploadRoutes from './routes/contractUploads';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -33,6 +34,7 @@ app.use('/api/society-services', societyServiceRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/reviews', reviewRoutes);
+app.use('/api/contract-uploads', contractUploadRoutes);
 
 app.listen(PORT, () => {
   console.log(`[SevaConnect Backend] Running on http://localhost:${PORT}`);

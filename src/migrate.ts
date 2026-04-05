@@ -1,5 +1,5 @@
 /**
- * Migration: Restructure services → global catalogue + society_services join table
+ * Migration + Seed: Initialize schema, run migrations, and seed demo users
  * Run with: npx tsx src/migrate.ts
  */
 import dotenv from 'dotenv';
@@ -12,6 +12,174 @@ const sql: any = neon(process.env.DATABASE_URL!);
 
 const generateId = (prefix: string): string =>
   `${prefix}-${crypto.randomUUID().split('-')[0]}-${Date.now().toString(36)}`;
+
+const hashPassword = (password: string): string =>
+  crypto.createHash('sha256').update(password).digest('hex');
+
+async function initSchema() {
+  console.log('=== SevaConnect DB Schema Init ===\n');
+
+  await sql(`
+    CREATE TABLE IF NOT EXISTS societies (
+      id      TEXT PRIMARY KEY,
+      name    TEXT NOT NULL,
+      address TEXT,
+      code    TEXT UNIQUE NOT NULL
+    )
+  `, []);
+  console.log('✓ societies');
+
+  await sql(`
+    CREATE TABLE IF NOT EXISTS users (
+      id                   TEXT PRIMARY KEY,
+      name                 TEXT NOT NULL,
+      username             TEXT UNIQUE NOT NULL,
+      password_hash        TEXT,
+      role                 TEXT NOT NULL,
+      society_id           TEXT REFERENCES societies(id),
+      is_verified          BOOLEAN NOT NULL DEFAULT FALSE,
+      phone                TEXT,
+      address              TEXT,
+      avatar_url           TEXT,
+      skills               TEXT[] DEFAULT '{}',
+      leaves               TEXT[] DEFAULT '{}',
+      must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+      auto_accept          BOOLEAN NOT NULL DEFAULT FALSE
+    )
+  `, []);
+  console.log('✓ users');
+
+  await sql(`
+    CREATE TABLE IF NOT EXISTS services (
+      id               TEXT PRIMARY KEY,
+      name             JSONB NOT NULL,
+      description      JSONB,
+      base_price       NUMERIC NOT NULL DEFAULT 0,
+      duration_minutes INTEGER NOT NULL DEFAULT 60,
+      icon             TEXT,
+      is_generic       BOOLEAN NOT NULL DEFAULT FALSE,
+      is_active        BOOLEAN NOT NULL DEFAULT TRUE
+    )
+  `, []);
+  console.log('✓ services');
+
+  await sql(`
+    CREATE TABLE IF NOT EXISTS society_services (
+      id          TEXT PRIMARY KEY,
+      society_id  TEXT NOT NULL REFERENCES societies(id),
+      service_id  TEXT REFERENCES services(id),
+      name        JSONB,
+      description JSONB,
+      price       NUMERIC,
+      duration    INTEGER,
+      icon        TEXT,
+      is_generic  BOOLEAN,
+      is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+  `, []);
+  console.log('✓ society_services');
+
+  await sql(`
+    CREATE TABLE IF NOT EXISTS bookings (
+      id                   TEXT PRIMARY KEY,
+      society_service_id   TEXT REFERENCES society_services(id),
+      household_id         TEXT REFERENCES users(id),
+      maid_id              TEXT REFERENCES users(id),
+      date                 TEXT,
+      start_time           TEXT,
+      end_time             TEXT,
+      status               TEXT NOT NULL DEFAULT 'REQUESTED',
+      start_otp            TEXT,
+      end_otp              TEXT,
+      maid_requested_start BOOLEAN DEFAULT FALSE,
+      maid_requested_end   BOOLEAN DEFAULT FALSE,
+      is_recurring         BOOLEAN NOT NULL DEFAULT FALSE,
+      frequency            TEXT,
+      custom_frequency_days INTEGER,
+      is_reviewed          BOOLEAN DEFAULT FALSE,
+      custom_price         NUMERIC,
+      custom_description   TEXT,
+      price_at_booking     NUMERIC,
+      service_id           TEXT REFERENCES services(id),
+      created_at           TIMESTAMPTZ DEFAULT NOW()
+    )
+  `, []);
+  console.log('✓ bookings');
+
+  await sql(`
+    CREATE TABLE IF NOT EXISTS reviews (
+      id           TEXT PRIMARY KEY,
+      booking_id   TEXT REFERENCES bookings(id),
+      maid_id      TEXT REFERENCES users(id),
+      household_id TEXT REFERENCES users(id),
+      rating       NUMERIC NOT NULL,
+      comment      TEXT,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `, []);
+  console.log('✓ reviews');
+
+  await sql(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id          TEXT PRIMARY KEY,
+      booking_id  TEXT REFERENCES bookings(id),
+      sender_id   TEXT REFERENCES users(id),
+      sender_name TEXT,
+      text        TEXT,
+      timestamp   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `, []);
+  console.log('✓ messages');
+
+  console.log('\n=== Schema init complete ===\n');
+}
+
+async function seedDemoData() {
+  console.log('=== Seeding Demo Data ===\n');
+
+  // Demo society
+  const existingSoc = await sql(`SELECT id FROM societies WHERE code = 'DEMO01'`, []);
+  let demoSocietyId: string;
+  if (existingSoc.length > 0) {
+    demoSocietyId = existingSoc[0].id;
+    console.log('↳ Demo society already exists, skipping');
+  } else {
+    demoSocietyId = generateId('soc');
+    await sql(
+      `INSERT INTO societies (id, name, address, code) VALUES ($1, $2, $3, $4)`,
+      [demoSocietyId, 'Demo Society', '123 Demo Street, City', 'DEMO01']
+    );
+    console.log('✓ Demo society created');
+  }
+
+  const pinHash = hashPassword('123456');
+  const demoUsers = [
+    { username: 'admin',       name: 'System Admin',          role: 'SYS_ADMIN',     phone: '9000000001', societyId: null },
+    { username: 'secretary',   name: 'Society Secretary',     role: 'SOCIETY_ADMIN', phone: '9000000002', societyId: demoSocietyId },
+    { username: '9876543210',  name: 'Priya (Demo Maid)',      role: 'MAID',          phone: '9876543210', societyId: demoSocietyId },
+    { username: '9123456789',  name: 'Rahul (Demo Household)', role: 'HOUSEHOLD',     phone: '9123456789', societyId: demoSocietyId },
+  ];
+
+  for (const u of demoUsers) {
+    const existing = await sql(`SELECT id FROM users WHERE username = $1`, [u.username]);
+    if (existing.length > 0) {
+      console.log(`  ↳ '${u.username}' already exists, skipping`);
+      continue;
+    }
+    const uid = generateId('u');
+    await sql(
+      `INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7, FALSE)`,
+      [uid, u.name, u.username, pinHash, u.role, u.societyId, u.phone]
+    );
+    console.log(`  ✓ ${u.username} (${u.role})`);
+  }
+
+  console.log('\nDemo login PIN: 123456');
+  console.log('  admin / secretary / 9876543210 / 9123456789');
+  console.log('\n=== Seed complete ===\n');
+}
 
 async function migrate() {
   console.log('=== SevaConnect DB Migration ===\n');
@@ -204,10 +372,34 @@ async function migrate() {
   await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_accept BOOLEAN NOT NULL DEFAULT FALSE`, []);
   console.log('✓ Added auto_accept to users');
 
+  // Step 14: Create contract_uploads table for bulk CSV upload history
+  await sql(`
+    CREATE TABLE IF NOT EXISTS contract_uploads (
+      id               TEXT PRIMARY KEY,
+      uploaded_by      TEXT REFERENCES users(id),
+      file_name        TEXT,
+      society_ids      TEXT[],
+      status           TEXT NOT NULL DEFAULT 'PROCESSING',
+      total_rows       INTEGER NOT NULL DEFAULT 0,
+      success_count    INTEGER NOT NULL DEFAULT 0,
+      failure_count    INTEGER NOT NULL DEFAULT 0,
+      errors           JSONB NOT NULL DEFAULT '[]',
+      created_bookings JSONB NOT NULL DEFAULT '[]',
+      created_at       TIMESTAMPTZ DEFAULT NOW()
+    )
+  `, []);
+  console.log('✓ Created contract_uploads table');
+
   console.log('\n=== Migration complete! ===');
 }
 
-migrate().catch((err) => {
-  console.error('Migration failed:', err);
+async function main() {
+  await initSchema();
+  await seedDemoData();
+  await migrate();
+}
+
+main().catch((err) => {
+  console.error('Failed:', err);
   process.exit(1);
 });

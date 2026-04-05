@@ -739,11 +739,11 @@ export const db = {
   createBooking: async (booking: any): Promise<Booking> => {
     const id = generateId('bk');
     await sql`INSERT INTO bookings (
-      id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
+      id, service_id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
       start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
       custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking
     ) VALUES (
-      ${id}, ${booking.societyServiceId}, ${booking.householdId}, ${booking.maidId},
+      ${id}, ${booking.serviceId || null}, ${booking.societyServiceId}, ${booking.householdId}, ${booking.maidId},
       ${booking.date}, ${booking.startTime}, ${booking.endTime}, ${BookingStatus.REQUESTED},
       null, null, ${booking.isRecurring || false}, ${booking.frequency || null},
       ${booking.customFrequencyDays || null}, false,
@@ -866,5 +866,82 @@ export const db = {
     const date = new Date().toISOString().split('T')[0];
     await sql`INSERT INTO reviews (id, booking_id, maid_id, household_id, household_name, rating, comment, date) VALUES (${id}, ${review.bookingId}, ${review.maidId}, ${review.householdId}, ${review.householdName}, ${review.rating}, ${review.comment}, ${date})`;
     await sql`UPDATE bookings SET is_reviewed = TRUE WHERE id = ${review.bookingId}`;
+  },
+
+  // ─── Contract Uploads ───
+  getUserByPhone: async (phone: string): Promise<User | null> => {
+    const rows = await (sql as any)(`SELECT * FROM users WHERE phone = $1`, [phone]);
+    return rows.length > 0 ? mapUser(rows[0]) : null;
+  },
+
+  getSocietyServiceByName: async (societyId: string, englishName: string): Promise<SocietyService | null> => {
+    const rows = await (sql as any)(
+      `SELECT
+        ss.id, ss.society_id, ss.service_id,
+        COALESCE(ss.name, s.name)               AS name,
+        COALESCE(ss.description, s.description) AS description,
+        COALESCE(ss.price, s.base_price)        AS effective_price,
+        s.base_price                            AS base_price,
+        ss.price                                AS price_override,
+        COALESCE(ss.duration, s.duration_minutes) AS duration_minutes,
+        COALESCE(ss.icon, s.icon)              AS icon,
+        COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
+        ss.is_active
+       FROM society_services ss
+       LEFT JOIN services s ON ss.service_id = s.id
+       WHERE ss.society_id = $1
+         AND (ss.name->>'en' ILIKE $2 OR s.name->>'en' ILIKE $2)
+         AND ss.is_active = true
+       LIMIT 1`,
+      [societyId, englishName]
+    );
+    return rows.length > 0 ? mapSocietyService(rows[0]) : null;
+  },
+
+  createContractUpload: async (upload: {
+    id: string;
+    uploadedBy: string;
+    fileName: string;
+    societyIds: string[];
+    status: string;
+    totalRows: number;
+    successCount: number;
+    failureCount: number;
+    errors: any[];
+    createdBookings: string[];
+  }): Promise<void> => {
+    await (sql as any)(
+      `INSERT INTO contract_uploads (id, uploaded_by, file_name, society_ids, status, total_rows, success_count, failure_count, errors, created_bookings)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)`,
+      [
+        upload.id,
+        upload.uploadedBy,
+        upload.fileName,
+        upload.societyIds,
+        upload.status,
+        upload.totalRows,
+        upload.successCount,
+        upload.failureCount,
+        JSON.stringify(upload.errors),
+        JSON.stringify(upload.createdBookings),
+      ]
+    );
+  },
+
+  getContractUploads: async (): Promise<any[]> => {
+    const rows = await (sql as any)(`SELECT * FROM contract_uploads ORDER BY created_at DESC`, []);
+    return rows.map((r: any) => ({
+      id: r.id,
+      uploadedBy: r.uploaded_by,
+      fileName: r.file_name,
+      societyIds: r.society_ids,
+      status: r.status,
+      totalRows: r.total_rows,
+      successCount: r.success_count,
+      failureCount: r.failure_count,
+      errors: r.errors,
+      createdBookings: r.created_bookings,
+      createdAt: r.created_at,
+    }));
   },
 };
