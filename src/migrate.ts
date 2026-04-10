@@ -204,9 +204,72 @@ async function migrate() {
   await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_accept BOOLEAN NOT NULL DEFAULT FALSE`, []);
   console.log('✓ Added auto_accept to users');
 
-  // Step 14: Add preferred_maid_id to users (household's preferred helper)
-  await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_maid_id TEXT REFERENCES users(id) ON DELETE SET NULL`, []);
-  console.log('✓ Added preferred_maid_id to users');
+  // Step 14: Truncate bookings for a clean slate (cascade removes FK-dependent rows)
+  await sql(`TRUNCATE TABLE bookings CASCADE`, []);
+  console.log('✓ Truncated bookings table (clean slate)');
+
+  // Step 15: staging_contracts table
+  await sql(`
+    CREATE TABLE IF NOT EXISTS staging_contracts (
+      id                    TEXT PRIMARY KEY,
+      upload_id             TEXT NOT NULL,
+      upload_user           TEXT NOT NULL REFERENCES users(id),
+      file_name             TEXT NOT NULL,
+      upload_timestamp      TIMESTAMPTZ DEFAULT NOW(),
+      household_phone       TEXT NOT NULL,
+      maid_phone            TEXT NOT NULL,
+      job_description       TEXT,
+      frequency             TEXT NOT NULL,
+      start_time            TEXT NOT NULL,
+      end_time              TEXT NOT NULL,
+      start_date            TEXT NOT NULL,
+      monthly_contract_fee  NUMERIC NOT NULL,
+      status                TEXT NOT NULL DEFAULT 'PENDING',
+      error_message         TEXT,
+      household_id          TEXT,
+      maid_id               TEXT,
+      society_id            TEXT
+    )
+  `, []);
+  console.log('✓ Created staging_contracts table');
+
+  // Step 16: contract_uploads audit table
+  await sql(`
+    CREATE TABLE IF NOT EXISTS contract_uploads (
+      id               TEXT PRIMARY KEY,
+      uploaded_by      TEXT NOT NULL REFERENCES users(id),
+      file_name        TEXT NOT NULL,
+      total_rows       INTEGER NOT NULL DEFAULT 0,
+      success_count    INTEGER NOT NULL DEFAULT 0,
+      failure_count    INTEGER NOT NULL DEFAULT 0,
+      errors           JSONB,
+      created_bookings JSONB,
+      created_at       TIMESTAMPTZ DEFAULT NOW()
+    )
+  `, []);
+  console.log('✓ Created contract_uploads table');
+
+  // Step 17: New columns on bookings + SCD Type 2 versioning columns
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`, []);
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS eff_start_date TEXT`, []);
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS eff_end_date TEXT`, []);
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS staging_contract_id TEXT REFERENCES staging_contracts(id)`, []);
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS is_contract BOOLEAN NOT NULL DEFAULT false`, []);
+  // SCD Type 2 versioning: valid_from/valid_to/is_current track row history
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ DEFAULT NOW()`, []);
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ`, []);
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true`, []);
+  // Backfill eff_start_date for any remaining existing rows
+  await sql(`UPDATE bookings SET eff_start_date = date WHERE eff_start_date IS NULL`, []);
+  console.log('✓ Added active, eff_start_date, eff_end_date, staging_contract_id, is_contract, valid_from, valid_to, is_current to bookings');
+
+  // Step 18: Global "Contract" service
+  await sql(`
+    INSERT INTO services (id, name, description, base_price, duration_minutes, icon, is_generic, is_active)
+    VALUES ('srv-contract-global', '{"en":"Contract"}', '{"en":"Recurring contract service"}', 0, 60, 'FileText', false, true)
+    ON CONFLICT (id) DO NOTHING
+  `, []);
+  console.log('✓ Inserted global Contract service (srv-contract-global)');
 
   console.log('\n=== Migration complete! ===');
 }

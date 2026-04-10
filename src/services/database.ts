@@ -130,6 +130,65 @@ export interface Booking {
   householdName?: string;
   householdAddress?: string;
   householdPhone?: string;
+  // Contract / SCD fields
+  active?: boolean;
+  effStartDate?: string;
+  effEndDate?: string;
+  stagingContractId?: string;
+  isContract?: boolean;
+  validFrom?: string;
+  validTo?: string;
+  isCurrent?: boolean;
+}
+
+export interface StagingContract {
+  id: string;
+  uploadId: string;
+  uploadUser: string;
+  fileName: string;
+  uploadTimestamp: string;
+  householdPhone: string;
+  maidPhone: string;
+  jobDescription?: string;
+  frequency: string;
+  startTime: string;
+  endTime: string;
+  startDate: string;
+  monthlyContractFee: number;
+  status: string;
+  errorMessage?: string;
+  householdId?: string;
+  maidId?: string;
+  societyId?: string;
+}
+
+export interface ContractUpload {
+  id: string;
+  uploadedBy: string;
+  fileName: string;
+  totalRows: number;
+  successCount: number;
+  failureCount: number;
+  errors?: any[];
+  createdBookings?: string[];
+  createdAt: string;
+}
+
+export interface ContractGroup {
+  stagingContractId: string;
+  frequency: string;
+  startTime: string;
+  endTime: string;
+  monthlyContractFee: number;
+  jobDescription?: string;
+  effStartDate?: string;
+  active: boolean;
+  maidName?: string;
+  householdName?: string;
+  householdAddress?: string;
+  bookingCount: number;
+  bookingIds: string[];
+  serviceIcon?: string;
 }
 
 export interface ChatMessage {
@@ -229,6 +288,15 @@ const mapBooking = (row: any): Booking => ({
   householdName: row.household_name,
   householdAddress: row.household_address,
   householdPhone: row.household_phone,
+  // Contract / SCD fields
+  active: row.active !== undefined ? Boolean(row.active) : true,
+  effStartDate: row.eff_start_date,
+  effEndDate: row.eff_end_date,
+  stagingContractId: row.staging_contract_id,
+  isContract: row.is_contract ? Boolean(row.is_contract) : false,
+  validFrom: row.valid_from,
+  validTo: row.valid_to,
+  isCurrent: row.is_current !== undefined ? Boolean(row.is_current) : true,
 });
 
 const mapMessage = (row: any): ChatMessage => ({
@@ -337,6 +405,18 @@ export const db = {
     const updated = await db.getUserById(id);
     if (!updated) throw new Error('Update failed');
     return updated;
+  },
+
+  getUserByPhone: async (phone: string): Promise<User | null> => {
+    const rows = await sql`
+      SELECT u.*,
+        (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) as computed_review_count,
+        (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) as computed_rating
+      FROM users u
+      WHERE u.phone = ${phone} OR u.username = ${phone}
+      LIMIT 1
+    `;
+    return rows.length > 0 ? mapUser(rows[0]) : null;
   },
 
   isPhoneRegistered: async (phone: string): Promise<boolean> => {
@@ -707,6 +787,8 @@ export const db = {
         b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
         b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
         b.custom_price, b.custom_description, b.price_at_booking,
+        b.active, b.eff_start_date, b.eff_end_date, b.staging_contract_id, b.is_contract,
+        b.valid_from, b.valid_to, b.is_current,
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
@@ -732,6 +814,8 @@ export const db = {
         b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
         b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
         b.custom_price, b.custom_description, b.price_at_booking,
+        b.active, b.eff_start_date, b.eff_end_date, b.staging_contract_id, b.is_contract,
+        b.valid_from, b.valid_to, b.is_current,
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
@@ -751,27 +835,55 @@ export const db = {
 
   createBooking: async (booking: any): Promise<Booking> => {
     const id = generateId('bk');
-    await sql`INSERT INTO bookings (
-      id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
-      start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
-      custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking
-    ) VALUES (
-      ${id}, ${booking.societyServiceId}, ${booking.householdId}, ${booking.maidId},
-      ${booking.date}, ${booking.startTime}, ${booking.endTime}, ${BookingStatus.REQUESTED},
-      null, null, ${booking.isRecurring || false}, ${booking.frequency || null},
-      ${booking.customFrequencyDays || null}, false,
-      ${booking.customPrice || null}, ${booking.customDescription || null}, false, false,
-      ${booking.priceAtBooking || null}
-    )`;
+    const initialStatus = booking.isContract ? BookingStatus.CONFIRMED : BookingStatus.REQUESTED;
+    const effStartDate = booking.effStartDate || booking.date;
+    await (sql as any)(
+      `INSERT INTO bookings (
+        id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
+        start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
+        custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
+        active, eff_start_date, eff_end_date, staging_contract_id, is_contract,
+        valid_from, is_current
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        null, null, $9, $10, $11, false,
+        $12, $13, false, false, $14,
+        $15, $16, $17, $18, $19,
+        NOW(), true
+      )`,
+      [
+        id,
+        booking.societyServiceId,
+        booking.householdId,
+        booking.maidId,
+        booking.date,
+        booking.startTime,
+        booking.endTime,
+        initialStatus,
+        booking.isRecurring || false,
+        booking.frequency || null,
+        booking.customFrequencyDays || null,
+        booking.customPrice || null,
+        booking.customDescription || null,
+        booking.priceAtBooking || null,
+        booking.active !== false,
+        effStartDate,
+        booking.effEndDate || null,
+        booking.stagingContractId || null,
+        booking.isContract || false,
+      ]
+    );
 
-    // Auto-accept: if the maid has opted in, immediately confirm the booking
-    const maidRows = await sql`SELECT auto_accept FROM users WHERE id = ${booking.maidId}`;
-    if (maidRows[0]?.auto_accept) {
-      await sql`UPDATE bookings SET status = ${BookingStatus.CONFIRMED} WHERE id = ${id}`;
-      return { ...booking, id, status: BookingStatus.CONFIRMED, isReviewed: false } as Booking;
+    // Auto-accept: if the maid has opted in, immediately confirm non-contract bookings
+    if (!booking.isContract) {
+      const maidRows = await sql`SELECT auto_accept FROM users WHERE id = ${booking.maidId}`;
+      if (maidRows[0]?.auto_accept) {
+        await sql`UPDATE bookings SET status = ${BookingStatus.CONFIRMED} WHERE id = ${id}`;
+        return { ...booking, id, status: BookingStatus.CONFIRMED, isReviewed: false } as Booking;
+      }
     }
 
-    return { ...booking, id, status: BookingStatus.REQUESTED, isReviewed: false } as Booking;
+    return { ...booking, id, status: initialStatus, isReviewed: false } as Booking;
   },
 
   updateBooking: async (id: string, updates: Partial<Booking>): Promise<void> => {
@@ -879,5 +991,170 @@ export const db = {
     const date = new Date().toISOString().split('T')[0];
     await sql`INSERT INTO reviews (id, booking_id, maid_id, household_id, household_name, rating, comment, date) VALUES (${id}, ${review.bookingId}, ${review.maidId}, ${review.householdId}, ${review.householdName}, ${review.rating}, ${review.comment}, ${date})`;
     await sql`UPDATE bookings SET is_reviewed = TRUE WHERE id = ${review.bookingId}`;
+  },
+
+  // ─── Contracts ───
+
+  createStagingContract: async (data: Partial<StagingContract> & { id: string; uploadId: string; uploadUser: string; fileName: string }): Promise<void> => {
+    await (sql as any)(
+      `INSERT INTO staging_contracts (
+        id, upload_id, upload_user, file_name,
+        household_phone, maid_phone, job_description, frequency,
+        start_time, end_time, start_date, monthly_contract_fee,
+        status, error_message, household_id, maid_id, society_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+      [
+        data.id, data.uploadId, data.uploadUser, data.fileName,
+        data.householdPhone, data.maidPhone, data.jobDescription || null, data.frequency,
+        data.startTime, data.endTime, data.startDate, data.monthlyContractFee,
+        data.status || 'PENDING', data.errorMessage || null,
+        data.householdId || null, data.maidId || null, data.societyId || null,
+      ]
+    );
+  },
+
+  createContractUpload: async (data: {
+    id: string; uploadedBy: string; fileName: string;
+    totalRows: number; successCount: number; failureCount: number;
+    errors?: any[]; createdBookings?: string[];
+  }): Promise<void> => {
+    await (sql as any)(
+      `INSERT INTO contract_uploads (id, uploaded_by, file_name, total_rows, success_count, failure_count, errors, created_bookings)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [
+        data.id, data.uploadedBy, data.fileName,
+        data.totalRows, data.successCount, data.failureCount,
+        JSON.stringify(data.errors || []),
+        JSON.stringify(data.createdBookings || []),
+      ]
+    );
+  },
+
+  getContractUploads: async (): Promise<ContractUpload[]> => {
+    const rows = await sql`SELECT * FROM contract_uploads ORDER BY created_at DESC`;
+    return rows.map((r: any) => ({
+      id: r.id,
+      uploadedBy: r.uploaded_by,
+      fileName: r.file_name,
+      totalRows: Number(r.total_rows),
+      successCount: Number(r.success_count),
+      failureCount: Number(r.failure_count),
+      errors: r.errors || [],
+      createdBookings: r.created_bookings || [],
+      createdAt: r.created_at,
+    }));
+  },
+
+  findOrCreateContractSocietyService: async (societyId: string): Promise<string> => {
+    const existing = await (sql as any)(
+      `SELECT id FROM society_services WHERE society_id = $1 AND service_id = 'srv-contract-global'`,
+      [societyId]
+    );
+    if (existing.length > 0) return existing[0].id;
+    const id = generateId('ss');
+    await (sql as any)(
+      `INSERT INTO society_services (id, society_id, service_id, is_active)
+       VALUES ($1, $2, 'srv-contract-global', true)`,
+      [id, societyId]
+    );
+    return id;
+  },
+
+  getBookingById: async (id: string): Promise<Booking | null> => {
+    const rows = await (sql as any)(
+      `SELECT b.*, b.is_contract FROM bookings b WHERE b.id = $1`,
+      [id]
+    );
+    return rows.length > 0 ? mapBooking(rows[0]) : null;
+  },
+
+  // SCD Type 2: close current version and insert new row with updated data
+  scdUpdateBooking: async (id: string, updates: Partial<Booking>): Promise<string> => {
+    // Close current version
+    await (sql as any)(
+      `UPDATE bookings SET valid_to = NOW(), is_current = false WHERE id = $1 AND is_current = true`,
+      [id]
+    );
+    // Fetch current row to clone
+    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1 ORDER BY valid_from DESC LIMIT 1`, [id]);
+    if (rows.length === 0) throw new Error(`Booking ${id} not found`);
+    const cur = rows[0];
+    const newId = generateId('bk');
+    const merged = { ...cur, ...Object.fromEntries(
+      Object.entries(updates).map(([k, v]) => [k.replace(/[A-Z]/g, (l: string) => `_${l.toLowerCase()}`), v])
+    ) };
+    await (sql as any)(
+      `INSERT INTO bookings (
+        id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
+        start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
+        custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
+        active, eff_start_date, eff_end_date, staging_contract_id, is_contract,
+        valid_from, valid_to, is_current
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW(),NULL,true)`,
+      [
+        newId, merged.society_service_id, merged.household_id, merged.maid_id,
+        merged.date, merged.start_time, merged.end_time, merged.status,
+        merged.start_otp, merged.end_otp, merged.is_recurring, merged.frequency,
+        merged.custom_frequency_days, merged.is_reviewed,
+        merged.custom_price, merged.custom_description,
+        merged.maid_requested_start, merged.maid_requested_end, merged.price_at_booking,
+        merged.active, merged.eff_start_date, merged.eff_end_date,
+        merged.staging_contract_id, merged.is_contract,
+      ]
+    );
+    return newId;
+  },
+
+  getContractsForUser: async (userId: string, role: string): Promise<ContractGroup[]> => {
+    const fieldName = role === 'MAID' ? 'b.maid_id' : 'b.household_id';
+    const rows = await (sql as any)(
+      `SELECT
+        b.staging_contract_id,
+        sc.frequency,
+        sc.start_time,
+        sc.end_time,
+        sc.monthly_contract_fee,
+        sc.job_description,
+        sc.start_date as eff_start_date,
+        sc.status as contract_status,
+        MIN(b.active::int) = 1 as all_active,
+        m.name as maid_name,
+        h.name as household_name,
+        h.address as household_address,
+        COUNT(b.id) as booking_count,
+        ARRAY_AGG(b.id) as booking_ids,
+        COALESCE(ss.icon, svc.icon) as service_icon
+      FROM bookings b
+      JOIN staging_contracts sc ON b.staging_contract_id = sc.id
+      JOIN users m ON b.maid_id = m.id
+      JOIN users h ON b.household_id = h.id
+      LEFT JOIN society_services ss ON b.society_service_id = ss.id
+      LEFT JOIN services svc ON ss.service_id = svc.id
+      WHERE ${fieldName} = $1
+        AND b.is_contract = true
+        AND b.is_current = true
+      GROUP BY
+        b.staging_contract_id, sc.frequency, sc.start_time, sc.end_time,
+        sc.monthly_contract_fee, sc.job_description, sc.start_date, sc.status,
+        m.name, h.name, h.address, ss.icon, svc.icon
+      ORDER BY sc.start_date DESC`,
+      [userId]
+    );
+    return rows.map((r: any): ContractGroup => ({
+      stagingContractId: r.staging_contract_id,
+      frequency: r.frequency,
+      startTime: r.start_time,
+      endTime: r.end_time,
+      monthlyContractFee: Number(r.monthly_contract_fee),
+      jobDescription: r.job_description,
+      effStartDate: r.eff_start_date,
+      active: r.all_active,
+      maidName: r.maid_name,
+      householdName: r.household_name,
+      householdAddress: r.household_address,
+      bookingCount: Number(r.booking_count),
+      bookingIds: r.booking_ids || [],
+      serviceIcon: r.service_icon,
+    }));
   },
 };

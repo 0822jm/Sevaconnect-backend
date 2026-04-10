@@ -10,6 +10,7 @@ import societyRoutes from './routes/societies';
 import serviceRoutes from './routes/services';
 import societyServiceRoutes from './routes/societyServices';
 import bookingRoutes from './routes/bookings';
+import contractUploadRoutes from './routes/contractUploads';
 import messageRoutes from './routes/messages';
 import reviewRoutes from './routes/reviews';
 
@@ -31,6 +32,7 @@ app.use('/api/societies', societyRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/society-services', societyServiceRoutes);
 app.use('/api/bookings', bookingRoutes);
+app.use('/api/contract-uploads', contractUploadRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/reviews', reviewRoutes);
 
