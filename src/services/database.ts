@@ -132,8 +132,6 @@ export interface Booking {
   householdPhone?: string;
   // Contract / SCD fields
   active?: boolean;
-  effStartDate?: string;
-  effEndDate?: string;
   stagingContractId?: string;
   isContract?: boolean;
   validFrom?: string;
@@ -290,8 +288,6 @@ const mapBooking = (row: any): Booking => ({
   householdPhone: row.household_phone,
   // Contract / SCD fields
   active: row.active !== undefined ? Boolean(row.active) : true,
-  effStartDate: row.eff_start_date,
-  effEndDate: row.eff_end_date,
   stagingContractId: row.staging_contract_id,
   isContract: row.is_contract ? Boolean(row.is_contract) : false,
   validFrom: row.valid_from,
@@ -787,7 +783,7 @@ export const db = {
         b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
         b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
         b.custom_price, b.custom_description, b.price_at_booking,
-        b.active, b.eff_start_date, b.eff_end_date, b.staging_contract_id, b.is_contract,
+        b.active, b.staging_contract_id, b.is_contract,
         b.valid_from, b.valid_to, b.is_current,
         m.name as maid_name,
         h.name as household_name,
@@ -801,6 +797,7 @@ export const db = {
       LEFT JOIN society_services ss ON b.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
       WHERE b.${fieldName} = $1
+        AND b.is_current = true
       ORDER BY b.date DESC, b.start_time DESC`,
       [userId]
     );
@@ -814,7 +811,7 @@ export const db = {
         b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
         b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
         b.custom_price, b.custom_description, b.price_at_booking,
-        b.active, b.eff_start_date, b.eff_end_date, b.staging_contract_id, b.is_contract,
+        b.active, b.staging_contract_id, b.is_contract,
         b.valid_from, b.valid_to, b.is_current,
         m.name as maid_name,
         h.name as household_name,
@@ -827,6 +824,7 @@ export const db = {
       LEFT JOIN society_services ss ON b.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
       WHERE h.society_id = $1
+        AND b.is_current = true
       ORDER BY b.date DESC, b.start_time DESC`,
       [societyId]
     );
@@ -836,19 +834,18 @@ export const db = {
   createBooking: async (booking: any): Promise<Booking> => {
     const id = generateId('bk');
     const initialStatus = booking.isContract ? BookingStatus.CONFIRMED : BookingStatus.REQUESTED;
-    const effStartDate = booking.effStartDate || booking.date;
     await (sql as any)(
       `INSERT INTO bookings (
         id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
         start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
         custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
-        active, eff_start_date, eff_end_date, staging_contract_id, is_contract,
+        active, staging_contract_id, is_contract,
         valid_from, is_current
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         null, null, $9, $10, $11, false,
         $12, $13, false, false, $14,
-        $15, $16, $17, $18, $19,
+        $15, $16, $17,
         NOW(), true
       )`,
       [
@@ -867,8 +864,6 @@ export const db = {
         booking.customDescription || null,
         booking.priceAtBooking || null,
         booking.active !== false,
-        effStartDate,
-        booking.effEndDate || null,
         booking.stagingContractId || null,
         booking.isContract || false,
       ]
@@ -1088,9 +1083,9 @@ export const db = {
         id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
         start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
         custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
-        active, eff_start_date, eff_end_date, staging_contract_id, is_contract,
+        active, staging_contract_id, is_contract,
         valid_from, valid_to, is_current
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW(),NULL,true)`,
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true)`,
       [
         newId, merged.society_service_id, merged.household_id, merged.maid_id,
         merged.date, merged.start_time, merged.end_time, merged.status,
@@ -1098,11 +1093,108 @@ export const db = {
         merged.custom_frequency_days, merged.is_reviewed,
         merged.custom_price, merged.custom_description,
         merged.maid_requested_start, merged.maid_requested_end, merged.price_at_booking,
-        merged.active, merged.eff_start_date, merged.eff_end_date,
-        merged.staging_contract_id, merged.is_contract,
+        merged.active, merged.staging_contract_id, merged.is_contract,
       ]
     );
     return newId;
+  },
+
+  // Update contract fields with SCD Type 2 on bookings
+  updateContract: async (
+    stagingContractId: string,
+    updates: { startTime: string; endTime: string; startDate?: string; monthlyFee?: number }
+  ): Promise<void> => {
+    const { startTime, endTime, startDate, monthlyFee } = updates;
+
+    // Fetch all current active bookings for this contract
+    const currentBookings = await (sql as any)(
+      `SELECT * FROM bookings WHERE staging_contract_id = $1 AND is_current = true AND active = true`,
+      [stagingContractId]
+    );
+
+    for (const cur of currentBookings) {
+      // Close the current version
+      await (sql as any)(
+        `UPDATE bookings SET valid_to = NOW(), is_current = false WHERE id = $1`,
+        [cur.id]
+      );
+      // Insert new version with updated fields
+      const newId = generateId('bk');
+      await (sql as any)(
+        `INSERT INTO bookings (
+          id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
+          start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
+          custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
+          active, staging_contract_id, is_contract,
+          valid_from, valid_to, is_current
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true)`,
+        [
+          newId, cur.society_service_id, cur.household_id, cur.maid_id,
+          startDate !== undefined ? startDate : cur.date, startTime, endTime, cur.status,
+          cur.start_otp, cur.end_otp, cur.is_recurring, cur.frequency,
+          cur.custom_frequency_days, cur.is_reviewed,
+          cur.custom_price, cur.custom_description,
+          cur.maid_requested_start, cur.maid_requested_end,
+          monthlyFee !== undefined ? monthlyFee : cur.price_at_booking,
+          cur.active, cur.staging_contract_id, cur.is_contract,
+        ]
+      );
+    }
+
+    // Update staging_contracts with all changed fields
+    const stagingUpdates: string[] = ['start_time = $1', 'end_time = $2'];
+    const stagingParams: any[] = [startTime, endTime];
+    if (startDate !== undefined) {
+      stagingParams.push(startDate);
+      stagingUpdates.push(`start_date = $${stagingParams.length}`);
+    }
+    if (monthlyFee !== undefined) {
+      stagingParams.push(monthlyFee);
+      stagingUpdates.push(`monthly_contract_fee = $${stagingParams.length}`);
+    }
+    stagingParams.push(stagingContractId);
+    await (sql as any)(
+      `UPDATE staging_contracts SET ${stagingUpdates.join(', ')} WHERE id = $${stagingParams.length}`,
+      stagingParams
+    );
+  },
+
+  // Save or update Expo push token for a user
+  savePushToken: async (userId: string, token: string): Promise<void> => {
+    await (sql as any)(
+      `UPDATE users SET expo_push_token = $1 WHERE id = $2`,
+      [token, userId]
+    );
+  },
+
+  // Get maid push token + household name for a staging contract (used for push notifications)
+  getMaidInfoForContract: async (stagingContractId: string): Promise<{ maidPushToken: string | null; householdName: string } | null> => {
+    const rows = await (sql as any)(
+      `SELECT u_maid.expo_push_token AS maid_push_token, u_household.name AS household_name
+       FROM staging_contracts sc
+       JOIN users u_maid ON sc.maid_id = u_maid.id
+       JOIN users u_household ON sc.household_id = u_household.id
+       WHERE sc.id = $1`,
+      [stagingContractId]
+    );
+    if (rows.length === 0) return null;
+    return {
+      maidPushToken: rows[0].maid_push_token || null,
+      householdName: rows[0].household_name || 'Household',
+    };
+  },
+
+  // Cancel all active bookings for a staging contract and mark it inactive
+  cancelContract: async (stagingContractId: string): Promise<void> => {
+    await (sql as any)(
+      `UPDATE bookings SET status = 'CANCELLED', active = false, is_current = false, valid_to = NOW()
+       WHERE staging_contract_id = $1 AND is_current = true AND active = true`,
+      [stagingContractId]
+    );
+    await (sql as any)(
+      `UPDATE staging_contracts SET status = 'CANCELLED' WHERE id = $1`,
+      [stagingContractId]
+    );
   },
 
   getContractsForUser: async (userId: string, role: string): Promise<ContractGroup[]> => {

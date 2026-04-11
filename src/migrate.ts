@@ -204,9 +204,8 @@ async function migrate() {
   await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_accept BOOLEAN NOT NULL DEFAULT FALSE`, []);
   console.log('✓ Added auto_accept to users');
 
-  // Step 14: Truncate bookings for a clean slate (cascade removes FK-dependent rows)
-  await sql(`TRUNCATE TABLE bookings CASCADE`, []);
-  console.log('✓ Truncated bookings table (clean slate)');
+  // Step 14: (one-time clean slate — intentionally skipped now that schema is stable)
+  console.log('✓ Step 14 skipped (bookings preserved)');
 
   // Step 15: staging_contracts table
   await sql(`
@@ -263,13 +262,22 @@ async function migrate() {
   await sql(`UPDATE bookings SET eff_start_date = date WHERE eff_start_date IS NULL`, []);
   console.log('✓ Added active, eff_start_date, eff_end_date, staging_contract_id, is_contract, valid_from, valid_to, is_current to bookings');
 
-  // Step 18: Global "Contract" service
+  // Step 18: Drop redundant eff_start_date and eff_end_date columns (superseded by valid_from/valid_to/is_current)
+  await sql(`ALTER TABLE bookings DROP COLUMN IF EXISTS eff_start_date`, []);
+  await sql(`ALTER TABLE bookings DROP COLUMN IF EXISTS eff_end_date`, []);
+  console.log('✓ Dropped eff_start_date and eff_end_date from bookings');
+
+  // Step 19: Global "Contract" service
   await sql(`
     INSERT INTO services (id, name, description, base_price, duration_minutes, icon, is_generic, is_active)
     VALUES ('srv-contract-global', '{"en":"Contract"}', '{"en":"Recurring contract service"}', 0, 60, 'FileText', false, true)
     ON CONFLICT (id) DO NOTHING
   `, []);
   console.log('✓ Inserted global Contract service (srv-contract-global)');
+
+  // Step 20: Expo push token on users (for contract update/cancel notifications)
+  await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS expo_push_token TEXT`, []);
+  console.log('✓ Added expo_push_token to users');
 
   console.log('\n=== Migration complete! ===');
 }

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db, BookingStatus, UserRole } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
+import { sendPushNotification } from '../services/pushNotifications';
 
 const router = Router();
 router.use(authMiddleware);
@@ -55,6 +56,79 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
+// PUT /api/bookings/contracts/:stagingContractId — household updates contract
+// MUST be defined before PUT /:id to avoid route shadowing
+router.put('/contracts/:stagingContractId', async (req: Request, res: Response) => {
+  try {
+    const { startTime, endTime, startDate, monthlyFee } = req.body;
+    if (!startTime || !endTime) {
+      res.status(400).json({ error: 'startTime and endTime are required' });
+      return;
+    }
+    const timeRe = /^\d{2}:\d{2}$/;
+    if (!timeRe.test(startTime) || !timeRe.test(endTime)) {
+      res.status(400).json({ error: 'startTime and endTime must be in HH:MM format' });
+      return;
+    }
+    if (startDate && !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      res.status(400).json({ error: 'startDate must be in YYYY-MM-DD format' });
+      return;
+    }
+    if (monthlyFee !== undefined && (isNaN(Number(monthlyFee)) || Number(monthlyFee) <= 0)) {
+      res.status(400).json({ error: 'monthlyFee must be a positive number' });
+      return;
+    }
+    await db.updateContract(req.params.stagingContractId, {
+      startTime,
+      endTime,
+      startDate: startDate || undefined,
+      monthlyFee: monthlyFee !== undefined ? Number(monthlyFee) : undefined,
+    });
+
+    // Notify maid about the contract update (fire-and-forget)
+    db.getMaidInfoForContract(req.params.stagingContractId).then(info => {
+      if (info?.maidPushToken) {
+        const changes: string[] = [`Time: ${startTime}–${endTime}`];
+        if (startDate) changes.push(`Start date: ${startDate}`);
+        if (monthlyFee !== undefined) changes.push(`Fee: ₹${Math.round(Number(monthlyFee))}`);
+        sendPushNotification(
+          info.maidPushToken,
+          'Contract Updated',
+          `${info.householdName} has updated your contract. ${changes.join(', ')}.`,
+        );
+      }
+    }).catch(() => {});
+
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/bookings/contracts/:stagingContractId — household cancels contract
+// MUST be defined before DELETE /:id if added in future
+router.delete('/contracts/:stagingContractId', async (req: Request, res: Response) => {
+  try {
+    // Fetch maid info before cancelling (after cancel the contract status changes)
+    const info = await db.getMaidInfoForContract(req.params.stagingContractId).catch(() => null);
+
+    await db.cancelContract(req.params.stagingContractId);
+
+    // Notify maid about cancellation (fire-and-forget)
+    if (info?.maidPushToken) {
+      sendPushNotification(
+        info.maidPushToken,
+        'Contract Cancelled',
+        `Your contract with ${info.householdName} has been cancelled.`,
+      );
+    }
+
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // PUT /api/bookings/:id
 router.put('/:id', async (req: Request, res: Response) => {
   try {
@@ -79,7 +153,7 @@ router.put('/:id/status', async (req: Request, res: Response) => {
     const booking = await db.getBookingById(req.params.id);
     if (booking?.isContract && status === BookingStatus.COMPLETED) {
       // SCD Type 2: contract ended — close current version with COMPLETED status
-      const newId = await db.scdUpdateBooking(req.params.id, { status: BookingStatus.COMPLETED, active: false, effEndDate: new Date().toISOString().split('T')[0] });
+      const newId = await db.scdUpdateBooking(req.params.id, { status: BookingStatus.COMPLETED, active: false });
       res.json({ success: true, newId });
     } else {
       await db.updateBookingStatus(req.params.id, status as BookingStatus);
@@ -102,7 +176,7 @@ router.post('/:id/request-otp', async (req: Request, res: Response) => {
       const nextStatus = type === 'start' ? BookingStatus.IN_PROGRESS : BookingStatus.COMPLETED;
       if (nextStatus === BookingStatus.COMPLETED) {
         // SCD Type 2 on contract end
-        await db.scdUpdateBooking(req.params.id, { status: BookingStatus.COMPLETED, active: false, effEndDate: new Date().toISOString().split('T')[0] });
+        await db.scdUpdateBooking(req.params.id, { status: BookingStatus.COMPLETED, active: false });
       } else {
         await db.updateBookingStatus(req.params.id, nextStatus);
       }

@@ -52,6 +52,21 @@ router.post('/:id/verify', async (req: Request, res: Response) => {
   }
 });
 
+// PUT /api/users/:id/push-token
+router.put('/:id/push-token', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token || typeof token !== 'string') {
+      res.status(400).json({ error: 'token is required' });
+      return;
+    }
+    await db.savePushToken(req.params.id, token);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // PUT /api/users/:id/auto-accept
 router.put('/:id/auto-accept', async (req: Request, res: Response) => {
   try {
