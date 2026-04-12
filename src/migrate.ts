@@ -279,6 +279,20 @@ async function migrate() {
   await sql(`ALTER TABLE users ADD COLUMN IF NOT EXISTS expo_push_token TEXT`, []);
   console.log('✓ Added expo_push_token to users');
 
+  // Step 21: Allow app-created contracts (upload_id and file_name nullable in staging_contracts)
+  // Step 22: Track auto-accepted bookings
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS auto_accepted BOOLEAN NOT NULL DEFAULT FALSE`, []);
+  console.log('✓ Added auto_accepted to bookings');
+
+  // Step 21: Allow app-created contracts (upload_id and file_name nullable in staging_contracts)
+  await sql(`ALTER TABLE staging_contracts ALTER COLUMN upload_id DROP NOT NULL`, []);
+  await sql(`ALTER TABLE staging_contracts ALTER COLUMN file_name DROP NOT NULL`, []);
+  console.log('✓ Made staging_contracts.upload_id and file_name nullable (supports app-created contracts)');
+
+  // Step 23: Audit log — why a booking row was closed (SCD Type 2 close reason)
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS update_comments TEXT`, []);
+  console.log('✓ Added update_comments to bookings (SCD close-reason audit log)');
+
   console.log('\n=== Migration complete! ===');
 }
 

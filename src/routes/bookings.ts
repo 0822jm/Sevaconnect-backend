@@ -36,6 +36,135 @@ router.get('/contracts', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/bookings/contracts/create — household creates a contract from the app
+router.post('/contracts/create', async (req: Request, res: Response) => {
+  try {
+    const {
+      householdId, maidId, frequency, startTime, endTime,
+      startDate, monthlyFee, jobDescription,
+    } = req.body;
+
+    if (!householdId || !maidId || !frequency || !startTime || !endTime || !startDate || !monthlyFee) {
+      res.status(400).json({ error: 'householdId, maidId, frequency, startTime, endTime, startDate, monthlyFee are required' });
+      return;
+    }
+    if (Number(monthlyFee) <= 0) {
+      res.status(400).json({ error: 'monthlyFee must be greater than 0' });
+      return;
+    }
+
+    // Validate users exist, same society, correct roles
+    const household = await db.getUserById(householdId);
+    const maid = await db.getUserById(maidId);
+    if (!household || household.role !== UserRole.HOUSEHOLD) {
+      res.status(400).json({ error: 'Invalid household user' }); return;
+    }
+    if (!maid || maid.role !== UserRole.MAID) {
+      res.status(400).json({ error: 'Invalid maid user' }); return;
+    }
+    if (!household.societyId) {
+      res.status(400).json({ error: 'Household is not assigned to a society' }); return;
+    }
+    if (maid.societyId && maid.societyId !== household.societyId) {
+      res.status(400).json({ error: 'Maid and household belong to different societies' }); return;
+    }
+
+    const societyId = household.societyId;
+    const freq = frequency.toUpperCase();
+
+    // Generate staging contract ID
+    const stagingId = `sc-${Date.now()}`;
+
+    // Create staging_contract row
+    await db.createStagingContract({
+      id: stagingId,
+      uploadUser: householdId,
+      uploadId: undefined,
+      fileName: undefined,
+      householdPhone: household.phone || '',
+      maidPhone: maid.phone || '',
+      jobDescription: jobDescription || undefined,
+      frequency: freq,
+      startTime,
+      endTime,
+      startDate,
+      monthlyContractFee: Number(monthlyFee),
+      status: 'SUCCESS',
+      householdId,
+      maidId,
+      societyId,
+    });
+
+    // Find or create the Contract society_service for this society
+    const societyServiceId = await db.findOrCreateContractSocietyService(societyId);
+
+    // Calculate end date: 6 months from startDate
+    const endDt = new Date(startDate);
+    endDt.setMonth(endDt.getMonth() + 6);
+    const endDate = endDt.toISOString().split('T')[0];
+
+    // Parse frequency → booking dates
+    const bookingDates: string[] = [];
+    if (freq === 'DAILY') {
+      // One booking per day for 7 days from start
+      const startDt = new Date(startDate);
+      for (let offset = 0; offset < 7; offset++) {
+        const d = new Date(startDt);
+        d.setDate(startDt.getDate() + offset);
+        bookingDates.push(d.toISOString().split('T')[0]);
+      }
+    } else {
+      const dayMap: Record<string, number> = { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 };
+      const targetDays = freq.split(',').map((d: string) => dayMap[d.trim()]).filter((d: number) => d !== undefined);
+      const startDt = new Date(startDate);
+      for (let offset = 0; offset < 7; offset++) {
+        const d = new Date(startDt);
+        d.setDate(startDt.getDate() + offset);
+        if (targetDays.includes(d.getDay())) {
+          bookingDates.push(d.toISOString().split('T')[0]);
+        }
+      }
+    }
+
+    // Create bookings
+    const createdBookingIds: string[] = [];
+    for (const bookingDate of bookingDates) {
+      const bk = await db.createBooking({
+        societyServiceId,
+        householdId,
+        maidId,
+        date: bookingDate,
+        startTime,
+        endTime,
+        isRecurring: true,
+        frequency: freq,
+        priceAtBooking: Number(monthlyFee),
+        customDescription: jobDescription || null,
+        isContract: true,
+        active: true,
+        effStartDate: startDate,
+        stagingContractId: stagingId,
+      });
+      createdBookingIds.push(bk.id);
+    }
+
+    // Notify maid
+    if ((maid as any).expo_push_token) {
+      const householdName = household.name || 'A household';
+      sendPushNotification(
+        (maid as any).expo_push_token,
+        'New Contract',
+        `${householdName} has created a contract with you starting ${startDate}`,
+        { type: 'contract_created', stagingContractId: stagingId }
+      );
+    }
+
+    res.status(201).json({ stagingContractId: stagingId, bookingIds: createdBookingIds, endDate });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/bookings/society/:societyId
 router.get('/society/:societyId', async (req: Request, res: Response) => {
   try {
@@ -105,22 +234,35 @@ router.put('/contracts/:stagingContractId', async (req: Request, res: Response) 
   }
 });
 
-// DELETE /api/bookings/contracts/:stagingContractId — household cancels contract
+// DELETE /api/bookings/contracts/:stagingContractId — cancel contract
+// Pass ?cancelledBy=MAID when the maid initiates cancellation (notifies household instead)
 // MUST be defined before DELETE /:id if added in future
 router.delete('/contracts/:stagingContractId', async (req: Request, res: Response) => {
   try {
-    // Fetch maid info before cancelling (after cancel the contract status changes)
-    const info = await db.getMaidInfoForContract(req.params.stagingContractId).catch(() => null);
+    const cancelledByMaid = req.query.cancelledBy === 'MAID';
 
-    await db.cancelContract(req.params.stagingContractId);
-
-    // Notify maid about cancellation (fire-and-forget)
-    if (info?.maidPushToken) {
-      sendPushNotification(
-        info.maidPushToken,
-        'Contract Cancelled',
-        `Your contract with ${info.householdName} has been cancelled.`,
-      );
+    if (cancelledByMaid) {
+      // Fetch household info before cancelling to send push notification
+      const info = await db.getHouseholdInfoForContract(req.params.stagingContractId).catch(() => null);
+      await db.cancelContract(req.params.stagingContractId);
+      if (info?.householdPushToken) {
+        sendPushNotification(
+          info.householdPushToken,
+          'Contract Cancelled',
+          `Your contract with ${info.maidName} has been cancelled by the maid.`,
+        );
+      }
+    } else {
+      // Household cancels — notify maid
+      const info = await db.getMaidInfoForContract(req.params.stagingContractId).catch(() => null);
+      await db.cancelContract(req.params.stagingContractId);
+      if (info?.maidPushToken) {
+        sendPushNotification(
+          info.maidPushToken,
+          'Contract Cancelled',
+          `Your contract with ${info.householdName} has been cancelled.`,
+        );
+      }
     }
 
     res.json({ success: true });

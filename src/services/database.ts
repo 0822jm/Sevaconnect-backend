@@ -137,6 +137,7 @@ export interface Booking {
   validFrom?: string;
   validTo?: string;
   isCurrent?: boolean;
+  updateComments?: string | null;
 }
 
 export interface StagingContract {
@@ -286,6 +287,7 @@ const mapBooking = (row: any): Booking => ({
   householdName: row.household_name,
   householdAddress: row.household_address,
   householdPhone: row.household_phone,
+  autoAccepted: row.auto_accepted ? Boolean(row.auto_accepted) : false,
   // Contract / SCD fields
   active: row.active !== undefined ? Boolean(row.active) : true,
   stagingContractId: row.staging_contract_id,
@@ -293,6 +295,7 @@ const mapBooking = (row: any): Booking => ({
   validFrom: row.valid_from,
   validTo: row.valid_to,
   isCurrent: row.is_current !== undefined ? Boolean(row.is_current) : true,
+  updateComments: row.update_comments ?? null,
 });
 
 const mapMessage = (row: any): ChatMessage => ({
@@ -783,7 +786,7 @@ export const db = {
         b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
         b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
         b.custom_price, b.custom_description, b.price_at_booking,
-        b.active, b.staging_contract_id, b.is_contract,
+        b.active, b.staging_contract_id, b.is_contract, b.auto_accepted,
         b.valid_from, b.valid_to, b.is_current,
         m.name as maid_name,
         h.name as household_name,
@@ -873,12 +876,12 @@ export const db = {
     if (!booking.isContract) {
       const maidRows = await sql`SELECT auto_accept FROM users WHERE id = ${booking.maidId}`;
       if (maidRows[0]?.auto_accept) {
-        await sql`UPDATE bookings SET status = ${BookingStatus.CONFIRMED} WHERE id = ${id}`;
-        return { ...booking, id, status: BookingStatus.CONFIRMED, isReviewed: false } as Booking;
+        await sql`UPDATE bookings SET status = ${BookingStatus.CONFIRMED}, auto_accepted = true WHERE id = ${id}`;
+        return { ...booking, id, status: BookingStatus.CONFIRMED, autoAccepted: true, isReviewed: false } as Booking;
       }
     }
 
-    return { ...booking, id, status: initialStatus, isReviewed: false } as Booking;
+    return { ...booking, id, status: initialStatus, autoAccepted: false, isReviewed: false } as Booking;
   },
 
   updateBooking: async (id: string, updates: Partial<Booking>): Promise<void> => {
@@ -990,7 +993,7 @@ export const db = {
 
   // ─── Contracts ───
 
-  createStagingContract: async (data: Partial<StagingContract> & { id: string; uploadId: string; uploadUser: string; fileName: string }): Promise<void> => {
+  createStagingContract: async (data: Partial<StagingContract> & { id: string; uploadUser: string; uploadId?: string; fileName?: string }): Promise<void> => {
     await (sql as any)(
       `INSERT INTO staging_contracts (
         id, upload_id, upload_user, file_name,
@@ -1065,27 +1068,46 @@ export const db = {
 
   // SCD Type 2: close current version and insert new row with updated data
   scdUpdateBooking: async (id: string, updates: Partial<Booking>): Promise<string> => {
-    // Close current version
-    await (sql as any)(
-      `UPDATE bookings SET valid_to = NOW(), is_current = false WHERE id = $1 AND is_current = true`,
-      [id]
-    );
-    // Fetch current row to clone
-    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1 ORDER BY valid_from DESC LIMIT 1`, [id]);
+    // Fetch current row before closing (needed for diff and clone)
+    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1 AND is_current = true`, [id]);
     if (rows.length === 0) throw new Error(`Booking ${id} not found`);
     const cur = rows[0];
-    const newId = generateId('bk');
-    const merged = { ...cur, ...Object.fromEntries(
+
+    // Build human-readable close-reason comment by diffing old vs new values
+    const fieldLabels: Record<string, string> = {
+      status: 'status', date: 'date', start_time: 'start_time', end_time: 'end_time',
+      custom_price: 'price', price_at_booking: 'price_at_booking',
+      frequency: 'frequency', active: 'active',
+    };
+    const snakeUpdates = Object.fromEntries(
       Object.entries(updates).map(([k, v]) => [k.replace(/[A-Z]/g, (l: string) => `_${l.toLowerCase()}`), v])
-    ) };
+    );
+    const changeParts: string[] = [];
+    for (const [col, label] of Object.entries(fieldLabels)) {
+      if (col in snakeUpdates && String(snakeUpdates[col]) !== String(cur[col])) {
+        changeParts.push(`${label} changed from "${cur[col]}" to "${snakeUpdates[col]}"`);
+      }
+    }
+    const updateComment = changeParts.length > 0
+      ? `Row closed: ${changeParts.join('; ')}`
+      : 'Row closed: booking updated';
+
+    // Close current version with the audit comment
+    await (sql as any)(
+      `UPDATE bookings SET valid_to = NOW(), is_current = false, update_comments = $2 WHERE id = $1 AND is_current = true`,
+      [id, updateComment]
+    );
+
+    const newId = generateId('bk');
+    const merged = { ...cur, ...snakeUpdates };
     await (sql as any)(
       `INSERT INTO bookings (
         id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
         start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
         custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
         active, staging_contract_id, is_contract,
-        valid_from, valid_to, is_current
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true)`,
+        valid_from, valid_to, is_current, update_comments
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true,NULL)`,
       [
         newId, merged.society_service_id, merged.household_id, merged.maid_id,
         merged.date, merged.start_time, merged.end_time, merged.status,
@@ -1113,10 +1135,22 @@ export const db = {
     );
 
     for (const cur of currentBookings) {
-      // Close the current version
+      // Build per-row close-reason comment by diffing old values against incoming updates
+      const changeParts: string[] = [];
+      if (startTime !== cur.start_time) changeParts.push(`start_time changed from "${cur.start_time}" to "${startTime}"`);
+      if (endTime !== cur.end_time) changeParts.push(`end_time changed from "${cur.end_time}" to "${endTime}"`);
+      if (startDate !== undefined && startDate !== cur.date) changeParts.push(`start_date changed from "${cur.date}" to "${startDate}"`);
+      if (monthlyFee !== undefined && Number(monthlyFee) !== Number(cur.price_at_booking)) {
+        changeParts.push(`monthly_fee changed from "${cur.price_at_booking}" to "${monthlyFee}"`);
+      }
+      const updateComment = changeParts.length > 0
+        ? `Row closed: ${changeParts.join('; ')}`
+        : 'Row closed: contract updated';
+
+      // Close the current version with audit comment
       await (sql as any)(
-        `UPDATE bookings SET valid_to = NOW(), is_current = false WHERE id = $1`,
-        [cur.id]
+        `UPDATE bookings SET valid_to = NOW(), is_current = false, update_comments = $2 WHERE id = $1`,
+        [cur.id, updateComment]
       );
       // Insert new version with updated fields
       const newId = generateId('bk');
@@ -1126,8 +1160,8 @@ export const db = {
           start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
           custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
           active, staging_contract_id, is_contract,
-          valid_from, valid_to, is_current
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true)`,
+          valid_from, valid_to, is_current, update_comments
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true,NULL)`,
         [
           newId, cur.society_service_id, cur.household_id, cur.maid_id,
           startDate !== undefined ? startDate : cur.date, startTime, endTime, cur.status,
@@ -1184,10 +1218,28 @@ export const db = {
     };
   },
 
+  getHouseholdInfoForContract: async (stagingContractId: string): Promise<{ householdPushToken: string | null; maidName: string } | null> => {
+    const rows = await (sql as any)(
+      `SELECT u_household.expo_push_token AS household_push_token, u_maid.name AS maid_name
+       FROM staging_contracts sc
+       JOIN users u_household ON sc.household_id = u_household.id
+       JOIN users u_maid ON sc.maid_id = u_maid.id
+       WHERE sc.id = $1`,
+      [stagingContractId]
+    );
+    if (rows.length === 0) return null;
+    return {
+      householdPushToken: rows[0].household_push_token || null,
+      maidName: rows[0].maid_name || 'Maid',
+    };
+  },
+
   // Cancel all active bookings for a staging contract and mark it inactive
   cancelContract: async (stagingContractId: string): Promise<void> => {
     await (sql as any)(
-      `UPDATE bookings SET status = 'CANCELLED', active = false, is_current = false, valid_to = NOW()
+      `UPDATE bookings
+       SET status = 'CANCELLED', active = false, is_current = false, valid_to = NOW(),
+           update_comments = 'Row closed: contract cancelled'
        WHERE staging_contract_id = $1 AND is_current = true AND active = true`,
       [stagingContractId]
     );
