@@ -130,6 +130,7 @@ export interface Booking {
   householdName?: string;
   householdAddress?: string;
   householdPhone?: string;
+  autoAccepted?: boolean;
   // Contract / SCD fields
   active?: boolean;
   stagingContractId?: string;

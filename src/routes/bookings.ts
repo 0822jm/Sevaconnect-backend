@@ -155,7 +155,6 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
         (maid as any).expo_push_token,
         'New Contract',
         `${householdName} has created a contract with you starting ${startDate}`,
-        { type: 'contract_created', stagingContractId: stagingId }
       );
     }
 
