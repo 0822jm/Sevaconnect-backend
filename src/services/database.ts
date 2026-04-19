@@ -1235,17 +1235,24 @@ export const db = {
     };
   },
 
-  // Returns all non-cancelled, non-expired contracts for a maid (used for conflict detection)
+  // Returns all non-cancelled contracts for a maid (used for conflict detection).
+  // Filters to contracts whose 6-month window hasn't expired yet (start_date + 6 months > today).
+  // Uses status != 'CANCELLED' (not status = 'SUCCESS') to catch all active states.
   getActiveContractsForMaid: async (maidId: string): Promise<Array<{ frequency: string; startTime: string; endTime: string }>> => {
     const rows = await (sql as any)(
-      `SELECT frequency, start_time, end_time
+      `SELECT frequency, start_time, end_time, start_date
        FROM staging_contracts
        WHERE maid_id = $1
-         AND status = 'SUCCESS'
-         AND (start_date::date + interval '6 months') > CURRENT_DATE`,
+         AND status != 'CANCELLED'`,
       [maidId]
     );
-    return rows.map((r: any) => ({ frequency: r.frequency, startTime: r.start_time, endTime: r.end_time }));
+    // Filter out expired contracts in application code (avoids any SQL date-cast edge cases)
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    const cutoff = sixMonthsAgo.toISOString().split('T')[0]; // YYYY-MM-DD
+    return rows
+      .filter((r: any) => r.start_date && r.start_date >= cutoff)
+      .map((r: any) => ({ frequency: r.frequency, startTime: r.start_time, endTime: r.end_time }));
   },
 
   // Cancel all active bookings for a staging contract and mark it inactive

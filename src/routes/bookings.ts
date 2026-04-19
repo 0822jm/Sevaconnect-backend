@@ -105,6 +105,20 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
     const societyId = household.societyId;
     const freq = frequency.toUpperCase();
 
+    // Backend safety-net: reject if maid already has a conflicting active contract
+    const existingContracts = await db.getActiveContractsForMaid(maidId);
+    const newDays = freq === 'DAILY' ? null : new Set(freq.split(','));
+    const hasConflict = existingContracts.some(c => {
+      const daysConflict = freq === 'DAILY' || c.frequency === 'DAILY' ||
+        (newDays !== null && c.frequency.split(',').some((d: string) => newDays.has(d)));
+      if (!daysConflict) return false;
+      return startTime < c.endTime && c.startTime < endTime;
+    });
+    if (hasConflict) {
+      res.status(409).json({ error: 'This maid already has an active contract that conflicts with the selected time and days.' });
+      return;
+    }
+
     // Generate staging contract ID
     const stagingId = `sc-${Date.now()}`;
 
