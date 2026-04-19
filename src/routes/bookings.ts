@@ -36,6 +36,39 @@ router.get('/contracts', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/bookings/contracts/check-conflict — checks if a maid has a conflicting active contract
+// Query params: maidId, frequency (DAILY or MON,WED,FRI), startTime (HH:MM), endTime (HH:MM)
+router.get('/contracts/check-conflict', async (req: Request, res: Response) => {
+  try {
+    const { maidId, frequency, startTime, endTime } = req.query as {
+      maidId: string; frequency: string; startTime: string; endTime: string;
+    };
+    if (!maidId || !frequency || !startTime || !endTime) {
+      res.status(400).json({ error: 'maidId, frequency, startTime, endTime are required' });
+      return;
+    }
+
+    const activeContracts = await db.getActiveContractsForMaid(maidId);
+    const newFreq = frequency.toUpperCase();
+    const newDays = newFreq === 'DAILY' ? null : new Set(newFreq.split(','));
+
+    const hasConflict = activeContracts.some(contract => {
+      // Check day overlap
+      const existingIsDailyOrNewIsDaily = newFreq === 'DAILY' || contract.frequency === 'DAILY';
+      const daysConflict = existingIsDailyOrNewIsDaily ||
+        (newDays !== null && contract.frequency.split(',').some(d => newDays.has(d)));
+      if (!daysConflict) return false;
+
+      // Check time overlap: two ranges [s1,e1) and [s2,e2) overlap if s1 < e2 && s2 < e1
+      return startTime < contract.endTime && contract.startTime < endTime;
+    });
+
+    res.json({ hasConflict });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/bookings/contracts/create — household creates a contract from the app
 router.post('/contracts/create', async (req: Request, res: Response) => {
   try {

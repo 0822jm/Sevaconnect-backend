@@ -1235,6 +1235,19 @@ export const db = {
     };
   },
 
+  // Returns all non-cancelled, non-expired contracts for a maid (used for conflict detection)
+  getActiveContractsForMaid: async (maidId: string): Promise<Array<{ frequency: string; startTime: string; endTime: string }>> => {
+    const rows = await (sql as any)(
+      `SELECT frequency, start_time, end_time
+       FROM staging_contracts
+       WHERE maid_id = $1
+         AND status = 'SUCCESS'
+         AND (start_date::date + interval '6 months') > CURRENT_DATE`,
+      [maidId]
+    );
+    return rows.map((r: any) => ({ frequency: r.frequency, startTime: r.start_time, endTime: r.end_time }));
+  },
+
   // Cancel all active bookings for a staging contract and mark it inactive
   cancelContract: async (stagingContractId: string): Promise<void> => {
     await (sql as any)(
