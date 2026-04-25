@@ -1259,6 +1259,52 @@ export const db = {
       .map((r: any) => ({ frequency: r.frequency, startTime: r.start_time, endTime: r.end_time }));
   },
 
+  // When a maid books leave that conflicts with a specific contract date, create a visible
+  // CANCELLED booking row for that date so the household can see the cancellation.
+  // If a current booking already exists for that date, update it to CANCELLED.
+  // If no row exists yet (future pattern date), insert one using an existing booking as template.
+  createLeaveExceptionBooking: async (stagingContractId: string, date: string): Promise<void> => {
+    // Check for an existing is_current=true booking on that date
+    const existing = await (sql as any)(
+      `SELECT id FROM bookings
+       WHERE staging_contract_id = $1 AND date = $2 AND is_current = true
+       LIMIT 1`,
+      [stagingContractId, date]
+    );
+    if (existing.length > 0) {
+      // Update the existing row to CANCELLED
+      await (sql as any)(
+        `UPDATE bookings
+         SET status = 'CANCELLED', active = false,
+             update_comments = 'Cancelled: maid leave'
+         WHERE id = $1`,
+        [existing[0].id]
+      );
+      return;
+    }
+    // No row exists for this date — use any existing booking as a template for IDs
+    const ref = await (sql as any)(
+      `SELECT society_service_id, household_id, maid_id, start_time, end_time, price_at_booking, custom_description
+       FROM bookings
+       WHERE staging_contract_id = $1 AND is_contract = true
+       LIMIT 1`,
+      [stagingContractId]
+    );
+    if (ref.length === 0) return; // No reference booking found, nothing to do
+    const r = ref[0];
+    const newId = generateId('bk');
+    await (sql as any)(
+      `INSERT INTO bookings (
+        id, society_service_id, household_id, maid_id, date, start_time, end_time,
+        status, is_recurring, is_contract, staging_contract_id, price_at_booking,
+        custom_description, active, is_current, valid_from
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,'CANCELLED',true,true,$8,$9,$10,false,true,NOW())
+      ON CONFLICT (id) DO NOTHING`,
+      [newId, r.society_service_id, r.household_id, r.maid_id, date, r.start_time, r.end_time,
+       stagingContractId, r.price_at_booking, r.custom_description]
+    );
+  },
+
   // Cancel all active bookings for a staging contract and mark it inactive
   cancelContract: async (stagingContractId: string): Promise<void> => {
     await (sql as any)(

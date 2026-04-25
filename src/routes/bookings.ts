@@ -65,6 +65,9 @@ router.post('/contract-leave-exception', async (req: Request, res: Response) => 
       );
     }
 
+    // Create a visible CANCELLED booking row for this date so the household calendar shows it
+    await db.createLeaveExceptionBooking(stagingContractId, date);
+
     res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
