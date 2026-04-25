@@ -1220,12 +1220,16 @@ export const db = {
   },
 
   getHouseholdInfoForContract: async (stagingContractId: string): Promise<{ householdPushToken: string | null; maidName: string } | null> => {
+    // Query via bookings (not staging_contracts) because staging_contracts.household_id / maid_id
+    // may be NULL if the upload pre-dates the resolved-ID columns, whereas bookings always carry them.
     const rows = await (sql as any)(
       `SELECT u_household.expo_push_token AS household_push_token, u_maid.name AS maid_name
-       FROM staging_contracts sc
-       JOIN users u_household ON sc.household_id = u_household.id
-       JOIN users u_maid ON sc.maid_id = u_maid.id
-       WHERE sc.id = $1`,
+       FROM bookings b
+       JOIN users u_household ON b.household_id = u_household.id
+       JOIN users u_maid ON b.maid_id = u_maid.id
+       WHERE b.staging_contract_id = $1
+         AND b.is_contract = true
+       LIMIT 1`,
       [stagingContractId]
     );
     if (rows.length === 0) return null;

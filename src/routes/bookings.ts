@@ -36,6 +36,41 @@ router.get('/contracts', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/bookings/contract-leave-exception
+// Called when a maid books leave that conflicts with a recurring contract.
+// Sends a push notification to the household so they can arrange a replacement.
+router.post('/contract-leave-exception', async (req: Request, res: Response) => {
+  try {
+    const { stagingContractId, date, leaveType } = req.body;
+    if (!stagingContractId || !date || !leaveType) {
+      res.status(400).json({ error: 'stagingContractId, date, and leaveType are required' });
+      return;
+    }
+
+    const info = await db.getHouseholdInfoForContract(stagingContractId);
+    if (!info) {
+      res.status(404).json({ error: 'Contract not found' });
+      return;
+    }
+
+    if (info.householdPushToken) {
+      const leaveDesc =
+        leaveType === 'FULL'      ? 'the full day' :
+        leaveType === 'MORNING'   ? 'the morning (8 AM – 12 PM)' :
+                                    'the afternoon (12 PM onwards)';
+      sendPushNotification(
+        info.householdPushToken,
+        'Contract – Replacement Needed',
+        `${info.maidName} is unavailable on ${date} for ${leaveDesc}. Please arrange a replacement helper.`,
+      );
+    }
+
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/bookings/contracts/check-conflict — checks if a maid has a conflicting active contract
 // Query params: maidId, frequency (DAILY or MON,WED,FRI), startTime (HH:MM), endTime (HH:MM)
 router.get('/contracts/check-conflict', async (req: Request, res: Response) => {
