@@ -1440,7 +1440,7 @@ export const db = {
         FROM bookings b
         JOIN users u_m ON b.maid_id      = u_m.id
         JOIN users u_h ON b.household_id = u_h.id
-        WHERE b.${fieldName}          = $1
+        WHERE ${fieldName}             = $1
           AND b.is_contract           = true
           AND b.is_replacement        = false
           AND b.is_current            = true
