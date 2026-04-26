@@ -355,6 +355,53 @@ router.delete('/contracts/:stagingContractId', async (req: Request, res: Respons
   }
 });
 
+// PUT /api/bookings/:id/assign-replacement
+// Assigns a replacement maid to a CANCELLED booking.
+// Adhoc: updates maid_id in place and restores CONFIRMED status.
+// Contract: creates a new CONFIRMED booking row for the replacement maid; original CANCELLED row kept as audit.
+router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
+  try {
+    const { replacementMaidId } = req.body;
+    if (!replacementMaidId) {
+      res.status(400).json({ error: 'replacementMaidId is required' });
+      return;
+    }
+    const booking = await db.getBookingById(req.params.id);
+    if (!booking) {
+      res.status(404).json({ error: 'Booking not found' });
+      return;
+    }
+    if (booking.status !== BookingStatus.CANCELLED) {
+      res.status(400).json({ error: 'Can only assign a replacement for a CANCELLED booking' });
+      return;
+    }
+    const replacementMaid = await db.getUserById(replacementMaidId);
+    if (!replacementMaid || replacementMaid.role !== UserRole.MAID) {
+      res.status(400).json({ error: 'Invalid replacement maid' });
+      return;
+    }
+
+    const result = await db.assignReplacementForBooking(req.params.id, replacementMaidId);
+
+    // Notify the replacement maid
+    const pushToken = (replacementMaid as any).expo_push_token;
+    if (pushToken) {
+      const dateLabel = new Date(booking.date + 'T00:00').toLocaleDateString('en-IN', {
+        weekday: 'short', day: 'numeric', month: 'short',
+      });
+      sendPushNotification(
+        pushToken,
+        result.isContract ? 'Contract Session Assigned' : 'New Booking Assigned',
+        `You have been assigned as a replacement helper on ${dateLabel} at ${booking.startTime}.`,
+      );
+    }
+
+    res.json({ success: true, newBookingId: result.newBookingId });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // PUT /api/bookings/:id
 router.put('/:id', async (req: Request, res: Response) => {
   try {
@@ -407,22 +454,36 @@ router.put('/:id/status', async (req: Request, res: Response) => {
 });
 
 // POST /api/bookings/:id/request-otp
-// Maid requests OTP → for contracts, auto-advance status without OTP exchange
+// Maid requests OTP → for contracts, auto-advance status without OTP exchange.
+// Virtual contract IDs (virtual-{stagingContractId}-{date}) are materialised on first tap.
 router.post('/:id/request-otp', async (req: Request, res: Response) => {
   try {
     const { type } = req.body; // 'start' | 'end'
-    const booking = await db.getBookingById(req.params.id);
+    let booking = await db.getBookingById(req.params.id);
+
+    // Virtual contract booking — materialise a real DB row on first Start Work tap
+    if (!booking && req.params.id.startsWith('virtual-')) {
+      const withoutPrefix = req.params.id.slice('virtual-'.length); // "{stagingContractId}-{YYYY-MM-DD}"
+      const date = withoutPrefix.slice(-10);                         // last 10 chars = YYYY-MM-DD
+      const stagingContractId = withoutPrefix.slice(0, -(10 + 1));  // everything before the trailing "-{date}"
+      booking = await db.materializeContractBooking(stagingContractId, date);
+      if (!booking) {
+        res.status(404).json({ error: 'Contract not found for virtual booking' });
+        return;
+      }
+    }
 
     if (booking?.isContract) {
       // Auto-advance status — no OTP needed
       const nextStatus = type === 'start' ? BookingStatus.IN_PROGRESS : BookingStatus.COMPLETED;
       if (nextStatus === BookingStatus.COMPLETED) {
         // SCD Type 2 on contract end
-        await db.scdUpdateBooking(req.params.id, { status: BookingStatus.COMPLETED, active: false });
+        await db.scdUpdateBooking(booking.id, { status: BookingStatus.COMPLETED, active: false });
       } else {
-        await db.updateBookingStatus(req.params.id, nextStatus);
+        await db.updateBookingStatus(booking.id, nextStatus);
       }
-      res.json({ success: true, status: nextStatus, autoAdvanced: true });
+      // Return the real booking ID so the client can update its local state
+      res.json({ success: true, status: nextStatus, autoAdvanced: true, bookingId: booking.id });
       return;
     }
 

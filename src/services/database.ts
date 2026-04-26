@@ -1327,6 +1327,57 @@ export const db = {
     );
   },
 
+  // Assign a replacement maid to a CANCELLED booking.
+  // Adhoc: update maid_id in-place and restore CONFIRMED status.
+  // Contract: insert a new CONFIRMED booking row for the replacement maid; original CANCELLED row is kept as audit trail.
+  assignReplacementForBooking: async (bookingId: string, replacementMaidId: string): Promise<{ newBookingId: string | null; isContract: boolean }> => {
+    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1`, [bookingId]);
+    if (rows.length === 0) throw new Error(`Booking ${bookingId} not found`);
+    const orig = rows[0];
+
+    if (!orig.is_contract) {
+      // Adhoc: update in place
+      await (sql as any)(
+        `UPDATE bookings
+         SET maid_id = $2, status = 'CONFIRMED',
+             maid_requested_start = false, maid_requested_end = false,
+             start_otp = NULL, end_otp = NULL,
+             update_comments = 'Replacement maid assigned'
+         WHERE id = $1`,
+        [bookingId, replacementMaidId]
+      );
+      return { newBookingId: null, isContract: false };
+    }
+
+    // Contract: create new CONFIRMED booking for replacement maid
+    const newId = generateId('bk');
+    await (sql as any)(
+      `INSERT INTO bookings (
+        id, society_service_id, household_id, maid_id, date, start_time, end_time,
+        status, is_recurring, frequency, is_contract, staging_contract_id,
+        price_at_booking, custom_description, active, is_current, valid_from
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        'CONFIRMED', true, $8, true, $9,
+        $10, $11, true, true, NOW()
+      )`,
+      [
+        newId,
+        orig.society_service_id,
+        orig.household_id,
+        replacementMaidId,
+        orig.date,
+        orig.start_time,
+        orig.end_time,
+        orig.frequency,
+        orig.staging_contract_id,
+        orig.price_at_booking,
+        orig.custom_description,
+      ]
+    );
+    return { newBookingId: newId, isContract: true };
+  },
+
   // Cancel all active bookings for a staging contract and mark it inactive
   cancelContract: async (stagingContractId: string): Promise<void> => {
     await (sql as any)(
@@ -1343,10 +1394,12 @@ export const db = {
   },
 
   getContractsForUser: async (userId: string, role: string): Promise<ContractGroup[]> => {
-    const fieldName = role === 'MAID' ? 'b.maid_id' : 'b.household_id';
+    // Anchor on staging_contracts (one row per contract) to avoid duplicate groups
+    // when replacement maids are assigned (which creates extra bookings under the same staging_contract_id).
+    const fieldName = role === 'MAID' ? 'sc.maid_id' : 'sc.household_id';
     const rows = await (sql as any)(
       `SELECT
-        b.staging_contract_id,
+        sc.id as staging_contract_id,
         sc.frequency,
         sc.start_time,
         sc.end_time,
@@ -1355,25 +1408,23 @@ export const db = {
         sc.start_date as eff_start_date,
         sc.status as contract_status,
         (sc.status != 'CANCELLED') as all_active,
-        m.name as maid_name,
-        h.name as household_name,
+        m.name  as maid_name,
+        h.name  as household_name,
         h.address as household_address,
-        COUNT(b.id) as booking_count,
-        ARRAY_AGG(b.id) as booking_ids,
-        COALESCE(ss.icon, svc.icon) as service_icon
-      FROM bookings b
-      JOIN staging_contracts sc ON b.staging_contract_id = sc.id
-      JOIN users m ON b.maid_id = m.id
-      JOIN users h ON b.household_id = h.id
-      LEFT JOIN society_services ss ON b.society_service_id = ss.id
-      LEFT JOIN services svc ON ss.service_id = svc.id
+        (SELECT COUNT(*) FROM bookings b2
+         WHERE b2.staging_contract_id = sc.id AND b2.is_current = true) as booking_count,
+        (SELECT ARRAY_AGG(b2.id ORDER BY b2.valid_from DESC) FROM bookings b2
+         WHERE b2.staging_contract_id = sc.id AND b2.is_current = true) as booking_ids,
+        (SELECT COALESCE(ss2.icon, svc2.icon)
+         FROM bookings b3
+         LEFT JOIN society_services ss2 ON b3.society_service_id = ss2.id
+         LEFT JOIN services svc2 ON ss2.service_id = svc2.id
+         WHERE b3.staging_contract_id = sc.id AND b3.is_current = true
+         LIMIT 1) as service_icon
+      FROM staging_contracts sc
+      JOIN users m ON sc.maid_id = m.id
+      JOIN users h ON sc.household_id = h.id
       WHERE ${fieldName} = $1
-        AND b.is_contract = true
-        AND b.is_current = true
-      GROUP BY
-        b.staging_contract_id, sc.frequency, sc.start_time, sc.end_time,
-        sc.monthly_contract_fee, sc.job_description, sc.start_date, sc.status,
-        m.name, h.name, h.address, ss.icon, svc.icon
       ORDER BY sc.start_date DESC`,
       [userId]
     );
@@ -1393,5 +1444,45 @@ export const db = {
       bookingIds: r.booking_ids || [],
       serviceIcon: r.service_icon,
     }));
+  },
+
+  // Materialise a real booking row for a contract date that only existed as a virtual frontend entry.
+  // Called by request-otp when the booking ID starts with "virtual-".
+  // Returns the newly inserted (or pre-existing) booking.
+  materializeContractBooking: async (stagingContractId: string, date: string): Promise<Booking | null> => {
+    // Check for a pre-existing row (race-condition guard)
+    const existing = await (sql as any)(
+      `SELECT id FROM bookings
+       WHERE staging_contract_id = $1 AND date = $2 AND is_current = true AND is_contract = true
+       LIMIT 1`,
+      [stagingContractId, date]
+    );
+    if (existing.length > 0) return db.getBookingById(existing[0].id);
+
+    // Clone metadata from any existing booking in this contract
+    const ref = await (sql as any)(
+      `SELECT society_service_id, household_id, maid_id, start_time, end_time,
+              price_at_booking, custom_description, frequency
+       FROM bookings
+       WHERE staging_contract_id = $1 AND is_contract = true
+       LIMIT 1`,
+      [stagingContractId]
+    );
+    if (ref.length === 0) return null;
+    const r = ref[0];
+    const newId = generateId('bk');
+    await (sql as any)(
+      `INSERT INTO bookings (
+        id, society_service_id, household_id, maid_id, date, start_time, end_time,
+        status, is_recurring, frequency, is_contract, staging_contract_id,
+        price_at_booking, custom_description, active, is_current, valid_from
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,'CONFIRMED',true,$8,true,$9,$10,$11,true,true,NOW())`,
+      [
+        newId, r.society_service_id, r.household_id, r.maid_id, date,
+        r.start_time, r.end_time, r.frequency, stagingContractId,
+        r.price_at_booking, r.custom_description,
+      ]
+    );
+    return db.getBookingById(newId);
   },
 };
