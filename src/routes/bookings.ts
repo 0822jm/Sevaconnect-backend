@@ -383,6 +383,22 @@ router.put('/:id/status', async (req: Request, res: Response) => {
       res.json({ success: true, newId });
     } else {
       await db.updateBookingStatus(req.params.id, status as BookingStatus);
+
+      // Notify household when their booking is cancelled or rejected by the maid
+      if (status === BookingStatus.CANCELLED || status === BookingStatus.REJECTED) {
+        const info = await db.getNotificationInfoForBooking(req.params.id);
+        if (info?.householdPushToken) {
+          const dateLabel = booking?.date
+            ? new Date(booking.date + 'T00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })
+            : 'your booking';
+          sendPushNotification(
+            info.householdPushToken,
+            'Booking Cancelled – Replacement Needed',
+            `${info.maidName} cancelled ${info.serviceName} on ${dateLabel}. Please arrange a replacement helper.`,
+          );
+        }
+      }
+
       res.json({ success: true });
     }
   } catch (e: any) {

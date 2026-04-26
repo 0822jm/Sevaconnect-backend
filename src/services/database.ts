@@ -1219,6 +1219,28 @@ export const db = {
     };
   },
 
+  // Returns household push token + maid name for any booking (used to notify household on cancellation)
+  getNotificationInfoForBooking: async (bookingId: string): Promise<{ householdPushToken: string | null; maidName: string; serviceName: string } | null> => {
+    const rows = await (sql as any)(
+      `SELECT u_household.expo_push_token AS household_push_token,
+              u_maid.name AS maid_name,
+              COALESCE(ss.name->>'en', svc.name->>'en', 'Service') AS service_name
+       FROM bookings b
+       JOIN users u_household ON b.household_id = u_household.id
+       JOIN users u_maid ON b.maid_id = u_maid.id
+       LEFT JOIN society_services ss ON b.society_service_id = ss.id
+       LEFT JOIN services svc ON ss.service_id = svc.id
+       WHERE b.id = $1`,
+      [bookingId]
+    );
+    if (rows.length === 0) return null;
+    return {
+      householdPushToken: rows[0].household_push_token || null,
+      maidName: rows[0].maid_name || 'Your maid',
+      serviceName: rows[0].service_name || 'Service',
+    };
+  },
+
   getHouseholdInfoForContract: async (stagingContractId: string): Promise<{ householdPushToken: string | null; maidName: string } | null> => {
     // Query via bookings (not staging_contracts) because staging_contracts.household_id / maid_id
     // may be NULL if the upload pre-dates the resolved-ID columns, whereas bookings always carry them.
@@ -1332,7 +1354,7 @@ export const db = {
         sc.job_description,
         sc.start_date as eff_start_date,
         sc.status as contract_status,
-        MIN(b.active::int) = 1 as all_active,
+        (sc.status != 'CANCELLED') as all_active,
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
