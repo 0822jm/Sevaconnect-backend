@@ -372,8 +372,14 @@ router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
       return;
     }
     if (booking.status !== BookingStatus.CANCELLED) {
-      res.status(400).json({ error: 'Can only assign a replacement for a CANCELLED booking' });
-      return;
+      // For CONFIRMED contract sessions: auto-cancel first, then assign replacement.
+      // This supports the proactive case where the household reassigns before the maid
+      // has formally requested leave.
+      if (!booking.isContract || booking.status !== BookingStatus.CONFIRMED) {
+        res.status(400).json({ error: 'Can only assign a replacement for a CANCELLED booking' });
+        return;
+      }
+      await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED);
     }
     const replacementMaid = await db.getUserById(replacementMaidId);
     if (!replacementMaid || replacementMaid.role !== UserRole.MAID) {
