@@ -1349,16 +1349,17 @@ export const db = {
       return { newBookingId: null, isContract: false };
     }
 
-    // Contract: create new CONFIRMED booking for replacement maid
+    // Contract: create new CONFIRMED booking for replacement maid.
+    // is_replacement = true prevents this appearing in the replacement maid's "My Contracts".
     const newId = generateId('bk');
     await (sql as any)(
       `INSERT INTO bookings (
         id, society_service_id, household_id, maid_id, date, start_time, end_time,
-        status, is_recurring, frequency, is_contract, staging_contract_id,
+        status, is_recurring, frequency, is_contract, is_replacement, staging_contract_id,
         price_at_booking, custom_description, active, is_current, valid_from
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7,
-        'CONFIRMED', true, $8, true, $9,
+        'CONFIRMED', true, $8, true, true, $9,
         $10, $11, true, true, NOW()
       )`,
       [
@@ -1394,38 +1395,59 @@ export const db = {
   },
 
   getContractsForUser: async (userId: string, role: string): Promise<ContractGroup[]> => {
-    // Anchor on staging_contracts (one row per contract) to avoid duplicate groups
-    // when replacement maids are assigned (which creates extra bookings under the same staging_contract_id).
-    const fieldName = role === 'MAID' ? 'sc.maid_id' : 'sc.household_id';
+    // Anchor on bookings (not staging_contracts) — one group per staging_contract_id.
+    // is_replacement = false ensures one-off replacement sessions don't create
+    // a separate contract group for the replacement maid.
+    const fieldName = role === 'MAID' ? 'b.maid_id' : 'b.household_id';
     const rows = await (sql as any)(
-      `SELECT
-        sc.id as staging_contract_id,
-        sc.frequency,
-        sc.start_time,
-        sc.end_time,
-        sc.monthly_contract_fee,
-        sc.job_description,
-        sc.start_date as eff_start_date,
-        sc.status as contract_status,
-        (sc.status != 'CANCELLED') as all_active,
-        m.name  as maid_name,
-        h.name  as household_name,
-        h.address as household_address,
-        (SELECT COUNT(*) FROM bookings b2
-         WHERE b2.staging_contract_id = sc.id AND b2.is_current = true) as booking_count,
-        (SELECT ARRAY_AGG(b2.id ORDER BY b2.valid_from DESC) FROM bookings b2
-         WHERE b2.staging_contract_id = sc.id AND b2.is_current = true) as booking_ids,
-        (SELECT COALESCE(ss2.icon, svc2.icon)
-         FROM bookings b3
-         LEFT JOIN society_services ss2 ON b3.society_service_id = ss2.id
-         LEFT JOIN services svc2 ON ss2.service_id = svc2.id
-         WHERE b3.staging_contract_id = sc.id AND b3.is_current = true
-         LIMIT 1) as service_icon
-      FROM staging_contracts sc
-      JOIN users m ON sc.maid_id = m.id
-      JOIN users h ON sc.household_id = h.id
-      WHERE ${fieldName} = $1
-      ORDER BY sc.start_date DESC`,
+      `SELECT sub.* FROM (
+        SELECT DISTINCT ON (b.staging_contract_id)
+          b.staging_contract_id,
+          b.frequency,
+          b.start_time,
+          b.end_time,
+          b.price_at_booking                                    AS monthly_contract_fee,
+          b.custom_description                                  AS job_description,
+          u_m.name                                              AS maid_name,
+          u_h.name                                              AS household_name,
+          u_h.address                                           AS household_address,
+          (SELECT MIN(b_s.date) FROM bookings b_s
+           WHERE b_s.staging_contract_id = b.staging_contract_id
+             AND b_s.is_replacement = false)                    AS eff_start_date,
+          (SELECT COUNT(*) FROM bookings b2
+           WHERE b2.staging_contract_id = b.staging_contract_id
+             AND b2.is_current    = true
+             AND b2.is_replacement = false)                     AS booking_count,
+          (SELECT ARRAY_AGG(b2.id ORDER BY b2.valid_from DESC)
+           FROM bookings b2
+           WHERE b2.staging_contract_id = b.staging_contract_id
+             AND b2.is_current    = true
+             AND b2.is_replacement = false)                     AS booking_ids,
+          (SELECT COALESCE(ss2.icon, svc2.icon)
+           FROM bookings b3
+           LEFT JOIN society_services ss2 ON b3.society_service_id = ss2.id
+           LEFT JOIN services        svc2 ON ss2.service_id        = svc2.id
+           WHERE b3.staging_contract_id = b.staging_contract_id
+             AND b3.is_current = true
+           LIMIT 1)                                             AS service_icon,
+          EXISTS (
+            SELECT 1 FROM bookings b4
+            WHERE b4.staging_contract_id = b.staging_contract_id
+              AND b4.is_current    = true
+              AND b4.active        = true
+              AND b4.is_replacement = false
+          )                                                     AS all_active
+        FROM bookings b
+        JOIN users u_m ON b.maid_id      = u_m.id
+        JOIN users u_h ON b.household_id = u_h.id
+        WHERE b.${fieldName}          = $1
+          AND b.is_contract           = true
+          AND b.is_replacement        = false
+          AND b.is_current            = true
+          AND b.staging_contract_id  IS NOT NULL
+        ORDER BY b.staging_contract_id, b.valid_from DESC
+      ) sub
+      ORDER BY sub.eff_start_date DESC NULLS LAST`,
       [userId]
     );
     return rows.map((r: any): ContractGroup => ({
@@ -1436,7 +1458,7 @@ export const db = {
       monthlyContractFee: Number(r.monthly_contract_fee),
       jobDescription: r.job_description,
       effStartDate: r.eff_start_date,
-      active: r.all_active,
+      active: Boolean(r.all_active),
       maidName: r.maid_name,
       householdName: r.household_name,
       householdAddress: r.household_address,

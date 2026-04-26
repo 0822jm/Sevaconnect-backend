@@ -293,6 +293,12 @@ async function migrate() {
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS update_comments TEXT`, []);
   console.log('✓ Added update_comments to bookings (SCD close-reason audit log)');
 
+  // Step 24: is_replacement flag — marks one-off replacement sessions so they don't
+  // appear in the replacement maid's "My Contracts" view. getContractsForUser now
+  // anchors on bookings (not staging_contracts) and filters is_replacement = false.
+  await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS is_replacement BOOLEAN NOT NULL DEFAULT false`, []);
+  console.log('✓ Added is_replacement to bookings (replacement session flag)');
+
   console.log('\n=== Migration complete! ===');
 }
 
