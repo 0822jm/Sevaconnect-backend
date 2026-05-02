@@ -69,65 +69,72 @@ async function migrate() {
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_at_booking NUMERIC`, []);
   console.log('✓ Added society_service_id + price_at_booking to bookings');
 
-  // Step 5: For bookings pointing at society-override services → set society_service_id
-  for (const [oldId, newId] of Object.entries(idMap)) {
-    await sql(
-      `UPDATE bookings SET society_service_id = $1 WHERE service_id = $2 AND society_service_id IS NULL`,
-      [newId, oldId]
-    );
-  }
-
-  // Step 6: For bookings still pointing at global services → create society_services entries
-  const globalBookings = await sql(
-    `SELECT DISTINCT b.service_id, h.society_id
-     FROM bookings b
-     JOIN users h ON b.household_id = h.id
-     WHERE b.society_service_id IS NULL AND b.service_id IS NOT NULL AND h.society_id IS NOT NULL`,
+  // Steps 5-7: Legacy service_id migration (skipped if service_id column already dropped)
+  const hasServiceId = await sql(
+    `SELECT COUNT(*) AS cnt FROM information_schema.columns
+     WHERE table_name = 'bookings' AND column_name = 'service_id' AND table_schema = 'public'`,
     []
   );
-
-  for (const row of globalBookings) {
-    const existing = await sql(
-      `SELECT id FROM society_services WHERE society_id = $1 AND service_id = $2`,
-      [row.society_id, row.service_id]
-    );
-    let ssId: string;
-    if (existing.length > 0) {
-      ssId = existing[0].id;
-    } else {
-      ssId = generateId('ss');
+  if (Number(hasServiceId[0].cnt) > 0) {
+    // Step 5: For bookings pointing at society-override services → set society_service_id
+    for (const [oldId, newId] of Object.entries(idMap)) {
       await sql(
-        `INSERT INTO society_services (id, society_id, service_id, is_active) VALUES ($1, $2, $3, true)`,
-        [ssId, row.society_id, row.service_id]
+        `UPDATE bookings SET society_service_id = $1 WHERE service_id = $2 AND society_service_id IS NULL`,
+        [newId, oldId]
       );
     }
+    // Step 6: For bookings still pointing at global services → create society_services entries
+    const globalBookings = await sql(
+      `SELECT DISTINCT b.service_id, h.society_id
+       FROM bookings b
+       JOIN users h ON b.household_id = h.id
+       WHERE b.society_service_id IS NULL AND b.service_id IS NOT NULL AND h.society_id IS NOT NULL`,
+      []
+    );
+    for (const row of globalBookings) {
+      const existing = await sql(
+        `SELECT id FROM society_services WHERE society_id = $1 AND service_id = $2`,
+        [row.society_id, row.service_id]
+      );
+      let ssId: string;
+      if (existing.length > 0) {
+        ssId = existing[0].id;
+      } else {
+        ssId = generateId('ss');
+        await sql(
+          `INSERT INTO society_services (id, society_id, service_id, is_active) VALUES ($1, $2, $3, true)`,
+          [ssId, row.society_id, row.service_id]
+        );
+      }
+      await sql(
+        `UPDATE bookings b
+         SET society_service_id = $1
+         FROM users h
+         WHERE b.household_id = h.id
+           AND b.service_id = $2
+           AND h.society_id = $3
+           AND b.society_service_id IS NULL`,
+        [ssId, row.service_id, row.society_id]
+      );
+    }
+    console.log(`✓ Resolved ${globalBookings.length} global-service booking groups`);
+    // Step 7: Populate price_at_booking from effective price
     await sql(
       `UPDATE bookings b
-       SET society_service_id = $1
-       FROM users h
-       WHERE b.household_id = h.id
-         AND b.service_id = $2
-         AND h.society_id = $3
-         AND b.society_service_id IS NULL`,
-      [ssId, row.service_id, row.society_id]
+       SET price_at_booking = COALESCE(
+         b.custom_price,
+         ss.price,
+         s.base_price
+       )
+       FROM society_services ss
+       LEFT JOIN services s ON ss.service_id = s.id
+       WHERE b.society_service_id = ss.id AND b.price_at_booking IS NULL`,
+      []
     );
+    console.log('✓ Populated price_at_booking on all bookings');
+  } else {
+    console.log('✓ Steps 5-7 skipped (service_id column already dropped)');
   }
-  console.log(`✓ Resolved ${globalBookings.length} global-service booking groups`);
-
-  // Step 7: Populate price_at_booking from effective price
-  await sql(
-    `UPDATE bookings b
-     SET price_at_booking = COALESCE(
-       b.custom_price,
-       ss.price,
-       s.base_price
-     )
-     FROM society_services ss
-     LEFT JOIN services s ON ss.service_id = s.id
-     WHERE b.society_service_id = ss.id AND b.price_at_booking IS NULL`,
-    []
-  );
-  console.log('✓ Populated price_at_booking on all bookings');
 
   // Step 8: Delete society-override rows from services (now in society_services)
   // Guard: only run if society_id column still exists
@@ -258,8 +265,11 @@ async function migrate() {
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ DEFAULT NOW()`, []);
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ`, []);
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true`, []);
-  // Backfill eff_start_date for any remaining existing rows
-  await sql(`UPDATE bookings SET eff_start_date = date WHERE eff_start_date IS NULL`, []);
+  // Backfill eff_start_date for any remaining existing rows (skip if date column already dropped by Step 25)
+  const dateColCheck = await sql(`SELECT COUNT(*) as cnt FROM information_schema.columns WHERE table_name = 'bookings' AND column_name = 'date'`, []);
+  if (Number((dateColCheck as any)[0]?.cnt) > 0) {
+    await sql(`UPDATE bookings SET eff_start_date = date WHERE eff_start_date IS NULL`, []);
+  }
   console.log('✓ Added active, eff_start_date, eff_end_date, staging_contract_id, is_contract, valid_from, valid_to, is_current to bookings');
 
   // Step 18: Drop redundant eff_start_date and eff_end_date columns (superseded by valid_from/valid_to/is_current)
