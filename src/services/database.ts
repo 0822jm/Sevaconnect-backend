@@ -54,8 +54,10 @@ export enum BookingStatus {
   IN_PROGRESS = 'IN_PROGRESS',
   COMPLETED = 'COMPLETED',
   CANCELLED = 'CANCELLED',
-  REJECTED = 'REJECTED',
+  TERMINATED = 'TERMINATED',
 }
+
+export type BookingType = 'ADHOC' | 'CONTRACT' | 'REPLACEMENT';
 
 export interface User {
   id: string;
@@ -106,10 +108,13 @@ export interface SocietyService {
 
 export interface Booking {
   id: string;
+  bookingType: BookingType;
+  isReplacementOf?: string;
   societyServiceId: string;
   householdId: string;
   maidId: string;
-  date: string;
+  workStartDate: string;
+  workEndDate: string;
   startTime: string;
   endTime: string;
   status: BookingStatus;
@@ -131,14 +136,12 @@ export interface Booking {
   householdAddress?: string;
   householdPhone?: string;
   autoAccepted?: boolean;
-  // Contract / SCD fields
-  active?: boolean;
+  // SCD2 fields
   stagingContractId?: string;
-  isContract?: boolean;
-  validFrom?: string;
-  validTo?: string;
-  isCurrent?: boolean;
+  effStartDate?: string;
+  effEndDate?: string;
   updateComments?: string | null;
+  createdAt?: string;
 }
 
 export interface StagingContract {
@@ -175,20 +178,22 @@ export interface ContractUpload {
 }
 
 export interface ContractGroup {
-  stagingContractId: string;
+  id: string;
   frequency: string;
   startTime: string;
   endTime: string;
   monthlyContractFee: number;
   jobDescription?: string;
+  workStartDate: string;
+  workEndDate: string;
   effStartDate?: string;
-  active: boolean;
+  effEndDate?: string;
+  status: string;
   maidName?: string;
   householdName?: string;
   householdAddress?: string;
-  bookingCount: number;
-  bookingIds: string[];
   serviceIcon?: string;
+  stagingContractId?: string;
 }
 
 export interface ChatMessage {
@@ -264,10 +269,13 @@ const mapSocietyService = (row: any): SocietyService => ({
 
 const mapBooking = (row: any): Booking => ({
   id: row.id,
+  bookingType: row.booking_type,
+  isReplacementOf: row.is_replacement_of || undefined,
   societyServiceId: row.society_service_id,
   householdId: row.household_id,
   maidId: row.maid_id,
-  date: row.date,
+  workStartDate: row.work_start_date,
+  workEndDate: row.work_end_date,
   startTime: row.start_time,
   endTime: row.end_time,
   status: row.status,
@@ -289,14 +297,12 @@ const mapBooking = (row: any): Booking => ({
   householdAddress: row.household_address,
   householdPhone: row.household_phone,
   autoAccepted: row.auto_accepted ? Boolean(row.auto_accepted) : false,
-  // Contract / SCD fields
-  active: row.active !== undefined ? Boolean(row.active) : true,
+  // SCD2 fields
   stagingContractId: row.staging_contract_id,
-  isContract: row.is_contract ? Boolean(row.is_contract) : false,
-  validFrom: row.valid_from,
-  validTo: row.valid_to,
-  isCurrent: row.is_current !== undefined ? Boolean(row.is_current) : true,
+  effStartDate: row.eff_start_date,
+  effEndDate: row.eff_end_date,
   updateComments: row.update_comments ?? null,
+  createdAt: row.created_at,
 });
 
 const mapMessage = (row: any): ChatMessage => ({
@@ -320,13 +326,13 @@ export const db = {
         ROUND(COALESCE(
           CASE
             WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
-             AND (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED') = 0
+             AND (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status != 'REQUESTED') = 0
             THEN 50
             ELSE
               (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) / 5.0 * 60
-              + (1.0 - (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'CANCELLED')::float
-                      / GREATEST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED'), 1)) * 30
-              + LEAST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'COMPLETED')::float / 50.0, 1.0) * 10
+              + (1.0 - (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'CANCELLED')::float
+                      / GREATEST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status NOT IN ('REQUESTED', 'TERMINATED')), 1)) * 30
+              + LEAST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'COMPLETED')::float / 50.0, 1.0) * 10
           END
         , 50)) as trust_score
       FROM users u
@@ -352,13 +358,13 @@ export const db = {
         ROUND(COALESCE(
           CASE
             WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
-             AND (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED') = 0
+             AND (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status != 'REQUESTED') = 0
             THEN 50
             ELSE
               (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) / 5.0 * 60
-              + (1.0 - (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'CANCELLED')::float
-                      / GREATEST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED'), 1)) * 30
-              + LEAST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'COMPLETED')::float / 50.0, 1.0) * 10
+              + (1.0 - (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'CANCELLED')::float
+                      / GREATEST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status NOT IN ('REQUESTED', 'TERMINATED')), 1)) * 30
+              + LEAST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'COMPLETED')::float / 50.0, 1.0) * 10
           END
         , 50)) as trust_score
       FROM users u
@@ -486,13 +492,13 @@ export const db = {
         ROUND(COALESCE(
           CASE
             WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
-             AND (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED') = 0
+             AND (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status != 'REQUESTED') = 0
             THEN 50
             ELSE
               (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) / 5.0 * 60
-              + (1.0 - (SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'CANCELLED')::float
-                      / GREATEST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status != 'REQUESTED'), 1)) * 30
-              + LEAST((SELECT COUNT(*) FROM bookings WHERE maid_id = u.id AND status = 'COMPLETED')::float / 50.0, 1.0) * 10
+              + (1.0 - (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'CANCELLED')::float
+                      / GREATEST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status NOT IN ('REQUESTED', 'TERMINATED')), 1)) * 30
+              + LEAST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'COMPLETED')::float / 50.0, 1.0) * 10
           END
         , 50)) as trust_score
       FROM users u
@@ -572,8 +578,9 @@ export const db = {
         (SELECT COUNT(*) FROM bookings b
          JOIN users u2 ON b.household_id = u2.id
          WHERE u2.society_id = s.id
-         AND b.date >= ${startDate}
-         AND b.date <= ${endDate}
+         AND b.work_start_date >= ${startDate}::date
+         AND b.work_start_date <= ${endDate}::date
+         AND b.eff_end_date = '3499-12-31'
          AND b.status IN ('CONFIRMED', 'REQUESTED', 'IN_PROGRESS')) as expected_bookings
       FROM societies s
     `;
@@ -782,27 +789,24 @@ export const db = {
   getBookingsForUser: async (userId: string, role: UserRole): Promise<Booking[]> => {
     const fieldName = role === UserRole.MAID ? 'maid_id' : 'household_id';
     const rows = await (sql as any)(
-      `SELECT
-        b.id, b.society_service_id, b.household_id, b.maid_id, b.date, b.start_time, b.end_time,
-        b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
-        b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
-        b.custom_price, b.custom_description, b.price_at_booking,
-        b.active, b.staging_contract_id, b.is_contract, b.auto_accepted,
-        b.valid_from, b.valid_to, b.is_current,
+      `SELECT sub.*,
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
         h.phone as household_phone,
         COALESCE(ss.name, svc.name) as service_name,
         COALESCE(ss.icon, svc.icon) as service_icon
-      FROM bookings b
-      JOIN users m ON b.maid_id = m.id
-      JOIN users h ON b.household_id = h.id
-      LEFT JOIN society_services ss ON b.society_service_id = ss.id
+      FROM (
+        SELECT DISTINCT ON (b.id) b.*
+        FROM bookings b
+        WHERE b.${fieldName} = $1
+        ORDER BY b.id, b.eff_end_date DESC
+      ) sub
+      JOIN users m ON sub.maid_id = m.id
+      JOIN users h ON sub.household_id = h.id
+      LEFT JOIN society_services ss ON sub.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
-      WHERE b.${fieldName} = $1
-        AND b.is_current = true
-      ORDER BY b.date DESC, b.start_time DESC`,
+      ORDER BY sub.work_start_date DESC, sub.start_time DESC`,
       [userId]
     );
     return rows.map(mapBooking);
@@ -810,94 +814,89 @@ export const db = {
 
   getBookingsBySociety: async (societyId: string): Promise<Booking[]> => {
     const rows = await (sql as any)(
-      `SELECT
-        b.id, b.society_service_id, b.household_id, b.maid_id, b.date, b.start_time, b.end_time,
-        b.status, b.start_otp, b.end_otp, b.maid_requested_start, b.maid_requested_end,
-        b.is_recurring, b.frequency, b.custom_frequency_days, b.is_reviewed,
-        b.custom_price, b.custom_description, b.price_at_booking,
-        b.active, b.staging_contract_id, b.is_contract,
-        b.valid_from, b.valid_to, b.is_current,
+      `SELECT sub.*,
         m.name as maid_name,
         h.name as household_name,
         h.address as household_address,
         COALESCE(ss.name, svc.name) as service_name,
         COALESCE(ss.icon, svc.icon) as service_icon
-      FROM bookings b
-      JOIN users m ON b.maid_id = m.id
-      JOIN users h ON b.household_id = h.id
-      LEFT JOIN society_services ss ON b.society_service_id = ss.id
+      FROM (
+        SELECT DISTINCT ON (b.id) b.*
+        FROM bookings b
+        JOIN users h2 ON b.household_id = h2.id
+        WHERE h2.society_id = $1
+        ORDER BY b.id, b.eff_end_date DESC
+      ) sub
+      JOIN users m ON sub.maid_id = m.id
+      JOIN users h ON sub.household_id = h.id
+      LEFT JOIN society_services ss ON sub.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
-      WHERE h.society_id = $1
-        AND b.is_current = true
-      ORDER BY b.date DESC, b.start_time DESC`,
+      ORDER BY sub.work_start_date DESC, sub.start_time DESC`,
       [societyId]
     );
     return rows.map(mapBooking);
   },
 
   createBooking: async (booking: any): Promise<Booking> => {
-    const id = generateId('bk');
-    const initialStatus = booking.isContract ? BookingStatus.CONFIRMED : BookingStatus.REQUESTED;
+    const id = booking.id || generateId('bk');
+    const bookingType: BookingType = booking.bookingType || 'ADHOC';
+    const initialStatus = bookingType === 'CONTRACT' ? BookingStatus.CONFIRMED : BookingStatus.REQUESTED;
     await (sql as any)(
       `INSERT INTO bookings (
-        id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
-        start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
-        custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
-        active, staging_contract_id, is_contract,
-        valid_from, is_current
+        id, booking_type, is_replacement_of, society_service_id, household_id, maid_id,
+        work_start_date, work_end_date, start_time, end_time, status,
+        is_recurring, frequency, custom_frequency_days,
+        custom_price, custom_description, price_at_booking,
+        staging_contract_id, auto_accepted, update_comments
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8,
-        null, null, $9, $10, $11, false,
-        $12, $13, false, false, $14,
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10, $11,
+        $12, $13, $14,
         $15, $16, $17,
-        NOW(), true
+        $18, $19, $20
       )`,
       [
-        id,
-        booking.societyServiceId,
-        booking.householdId,
-        booking.maidId,
-        booking.date,
-        booking.startTime,
-        booking.endTime,
-        initialStatus,
-        booking.isRecurring || false,
-        booking.frequency || null,
-        booking.customFrequencyDays || null,
-        booking.customPrice || null,
-        booking.customDescription || null,
-        booking.priceAtBooking || null,
-        booking.active !== false,
-        booking.stagingContractId || null,
-        booking.isContract || false,
+        id, bookingType, booking.isReplacementOf || null,
+        booking.societyServiceId, booking.householdId, booking.maidId,
+        booking.workStartDate, booking.workEndDate, booking.startTime, booking.endTime,
+        booking.status || initialStatus,
+        booking.isRecurring || false, booking.frequency || null, booking.customFrequencyDays || null,
+        booking.customPrice || null, booking.customDescription || null, booking.priceAtBooking || null,
+        booking.stagingContractId || null, booking.autoAccepted || false, booking.updateComments || null,
       ]
     );
 
-    // Auto-accept: if the maid has opted in, immediately confirm non-contract bookings
-    if (!booking.isContract) {
+    // Auto-accept: if the maid has opted in, immediately confirm non-contract ADHOC bookings
+    if (bookingType === 'ADHOC' && (!booking.status || booking.status === BookingStatus.REQUESTED)) {
       const maidRows = await sql`SELECT auto_accept FROM users WHERE id = ${booking.maidId}`;
       if (maidRows[0]?.auto_accept) {
-        await sql`UPDATE bookings SET status = ${BookingStatus.CONFIRMED}, auto_accepted = true WHERE id = ${id}`;
-        return { ...booking, id, status: BookingStatus.CONFIRMED, autoAccepted: true, isReviewed: false } as Booking;
+        await (sql as any)(
+          `UPDATE bookings SET status = $1, auto_accepted = true WHERE id = $2 AND eff_end_date = '3499-12-31'`,
+          [BookingStatus.CONFIRMED, id]
+        );
+        return { ...booking, id, bookingType, status: BookingStatus.CONFIRMED, autoAccepted: true, isReviewed: false } as Booking;
       }
     }
 
-    return { ...booking, id, status: initialStatus, autoAccepted: false, isReviewed: false } as Booking;
+    return { ...booking, id, bookingType, status: booking.status || initialStatus, autoAccepted: false, isReviewed: false } as Booking;
   },
 
   updateBooking: async (id: string, updates: Partial<Booking>): Promise<void> => {
-    const allowedKeys = ['date', 'startTime', 'endTime', 'status', 'startOtp', 'endOtp', 'customPrice'];
+    const allowedKeys = ['startTime', 'endTime', 'status', 'startOtp', 'endOtp', 'customPrice'];
     const entries = Object.entries(updates).filter(([key]) => allowedKeys.includes(key));
     if (entries.length === 0) return;
 
     const dbFields = entries.map(([key, _], i) => `${key.replace(/[A-Z]/g, (l: string) => `_${l.toLowerCase()}`)} = $${i + 2}`);
-    const query = `UPDATE bookings SET ${dbFields.join(', ')} WHERE id = $1`;
+    const query = `UPDATE bookings SET ${dbFields.join(', ')} WHERE id = $1 AND eff_end_date = '3499-12-31'`;
     const params = [id, ...entries.map(([_, v]) => v)];
     await (sql as any)(query, params);
   },
 
   updateBookingStatus: async (id: string, status: BookingStatus): Promise<void> => {
-    await sql`UPDATE bookings SET status = ${status} WHERE id = ${id}`;
+    await (sql as any)(
+      `UPDATE bookings SET status = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`,
+      [status, id]
+    );
   },
 
   getHouseholdPhoneForBooking: async (bookingId: string): Promise<string> => {
@@ -913,15 +912,15 @@ export const db = {
   setOtpRequested: async (id: string, type: 'start' | 'end'): Promise<string> => {
     const otp = generate4DigitOtp();
     if (type === 'start') {
-      await sql`UPDATE bookings SET maid_requested_start = TRUE, start_otp = ${otp} WHERE id = ${id}`;
+      await (sql as any)(`UPDATE bookings SET maid_requested_start = TRUE, start_otp = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`, [otp, id]);
     } else {
-      await sql`UPDATE bookings SET maid_requested_end = TRUE, end_otp = ${otp} WHERE id = ${id}`;
+      await (sql as any)(`UPDATE bookings SET maid_requested_end = TRUE, end_otp = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`, [otp, id]);
     }
     return otp;
   },
 
   verifyStoredOtp: async (id: string, type: 'start' | 'end', code: string): Promise<boolean> => {
-    const rows = await sql`SELECT start_otp, end_otp FROM bookings WHERE id = ${id}`;
+    const rows = await (sql as any)(`SELECT start_otp, end_otp FROM bookings WHERE id = $1 AND eff_end_date = '3499-12-31'`, [id]);
     if (rows.length === 0) return false;
     const storedOtp = type === 'start' ? rows[0].start_otp : rows[0].end_otp;
     return storedOtp === code;
@@ -930,18 +929,18 @@ export const db = {
   regenerateOtp: async (id: string, type: 'start' | 'end'): Promise<string> => {
     const otp = generate4DigitOtp();
     if (type === 'start') {
-      await sql`UPDATE bookings SET start_otp = ${otp} WHERE id = ${id}`;
+      await (sql as any)(`UPDATE bookings SET start_otp = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`, [otp, id]);
     } else {
-      await sql`UPDATE bookings SET end_otp = ${otp} WHERE id = ${id}`;
+      await (sql as any)(`UPDATE bookings SET end_otp = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`, [otp, id]);
     }
     return otp;
   },
 
   cancelOtpRequest: async (id: string, type: 'start' | 'end'): Promise<void> => {
     if (type === 'start') {
-      await sql`UPDATE bookings SET maid_requested_start = FALSE, start_otp = NULL WHERE id = ${id}`;
+      await (sql as any)(`UPDATE bookings SET maid_requested_start = FALSE, start_otp = NULL WHERE id = $1 AND eff_end_date = '3499-12-31'`, [id]);
     } else {
-      await sql`UPDATE bookings SET maid_requested_end = FALSE, end_otp = NULL WHERE id = ${id}`;
+      await (sql as any)(`UPDATE bookings SET maid_requested_end = FALSE, end_otp = NULL WHERE id = $1 AND eff_end_date = '3499-12-31'`, [id]);
     }
   },
 
@@ -989,7 +988,7 @@ export const db = {
     const id = generateId('rv');
     const date = new Date().toISOString().split('T')[0];
     await sql`INSERT INTO reviews (id, booking_id, maid_id, household_id, household_name, rating, comment, date) VALUES (${id}, ${review.bookingId}, ${review.maidId}, ${review.householdId}, ${review.householdName}, ${review.rating}, ${review.comment}, ${date})`;
-    await sql`UPDATE bookings SET is_reviewed = TRUE WHERE id = ${review.bookingId}`;
+    await (sql as any)(`UPDATE bookings SET is_reviewed = TRUE WHERE id = $1 AND eff_end_date = '3499-12-31'`, [review.bookingId]);
   },
 
   // ─── Contracts ───
@@ -1061,24 +1060,30 @@ export const db = {
 
   getBookingById: async (id: string): Promise<Booking | null> => {
     const rows = await (sql as any)(
-      `SELECT b.*, b.is_contract FROM bookings b WHERE b.id = $1`,
+      `SELECT b.* FROM bookings b WHERE b.id = $1 ORDER BY b.eff_end_date DESC LIMIT 1`,
       [id]
     );
     return rows.length > 0 ? mapBooking(rows[0]) : null;
   },
 
   // SCD Type 2: close current version and insert new row with updated data
+  // Returns the same id (stable business key). The new row gets a new eff_start_date.
   scdUpdateBooking: async (id: string, updates: Partial<Booking>): Promise<string> => {
-    // Fetch current row before closing (needed for diff and clone)
-    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1 AND is_current = true`, [id]);
-    if (rows.length === 0) throw new Error(`Booking ${id} not found`);
+    // Fetch current active row
+    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1 AND eff_end_date = '3499-12-31'`, [id]);
+    if (rows.length === 0) throw new Error(`Booking ${id} not found or not active`);
     const cur = rows[0];
+
+    // Reject maid_id changes on CONTRACT records
+    if (cur.booking_type === 'CONTRACT' && updates.maidId && updates.maidId !== cur.maid_id) {
+      throw new Error('Cannot change maid_id on a CONTRACT. Terminate and create a new contract instead.');
+    }
 
     // Build human-readable close-reason comment by diffing old vs new values
     const fieldLabels: Record<string, string> = {
-      status: 'status', date: 'date', start_time: 'start_time', end_time: 'end_time',
+      status: 'status', start_time: 'start_time', end_time: 'end_time',
       custom_price: 'price', price_at_booking: 'price_at_booking',
-      frequency: 'frequency', active: 'active',
+      frequency: 'frequency', work_start_date: 'work_start_date', work_end_date: 'work_end_date',
     };
     const snakeUpdates = Object.fromEntries(
       Object.entries(updates).map(([k, v]) => [k.replace(/[A-Z]/g, (l: string) => `_${l.toLowerCase()}`), v])
@@ -1093,105 +1098,67 @@ export const db = {
       ? `Row closed: ${changeParts.join('; ')}`
       : 'Row closed: booking updated';
 
-    // Close current version with the audit comment
+    // Close current version
     await (sql as any)(
-      `UPDATE bookings SET valid_to = NOW(), is_current = false, update_comments = $2 WHERE id = $1 AND is_current = true`,
+      `UPDATE bookings SET eff_end_date = NOW(), update_comments = $2 WHERE id = $1 AND eff_end_date = '3499-12-31'`,
       [id, updateComment]
     );
 
-    const newId = generateId('bk');
+    // Insert new version with same id, new eff_start_date
     const merged = { ...cur, ...snakeUpdates };
     await (sql as any)(
       `INSERT INTO bookings (
-        id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
+        id, booking_type, is_replacement_of, society_service_id, household_id, maid_id,
+        work_start_date, work_end_date, start_time, end_time, status,
         start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
         custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
-        active, staging_contract_id, is_contract,
-        valid_from, valid_to, is_current, update_comments
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true,NULL)`,
+        staging_contract_id, auto_accepted, update_comments
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NULL)`,
       [
-        newId, merged.society_service_id, merged.household_id, merged.maid_id,
-        merged.date, merged.start_time, merged.end_time, merged.status,
+        id, merged.booking_type, merged.is_replacement_of,
+        merged.society_service_id, merged.household_id, merged.maid_id,
+        merged.work_start_date, merged.work_end_date, merged.start_time, merged.end_time, merged.status,
         merged.start_otp, merged.end_otp, merged.is_recurring, merged.frequency,
         merged.custom_frequency_days, merged.is_reviewed,
         merged.custom_price, merged.custom_description,
         merged.maid_requested_start, merged.maid_requested_end, merged.price_at_booking,
-        merged.active, merged.staging_contract_id, merged.is_contract,
+        merged.staging_contract_id, merged.auto_accepted,
       ]
     );
-    return newId;
+    return id;
   },
 
-  // Update contract fields with SCD Type 2 on bookings
+  // Update contract via SCD Type 2 — close current row and insert new version
   updateContract: async (
-    stagingContractId: string,
+    contractBookingId: string,
     updates: { startTime: string; endTime: string; startDate?: string; monthlyFee?: number }
   ): Promise<void> => {
-    const { startTime, endTime, startDate, monthlyFee } = updates;
+    const scdUpdates: Partial<Booking> = {};
+    if (updates.startTime) scdUpdates.startTime = updates.startTime;
+    if (updates.endTime) scdUpdates.endTime = updates.endTime;
+    if (updates.startDate) scdUpdates.workStartDate = updates.startDate;
+    if (updates.monthlyFee !== undefined) scdUpdates.priceAtBooking = updates.monthlyFee;
+    await db.scdUpdateBooking(contractBookingId, scdUpdates);
 
-    // Fetch all current active bookings for this contract
-    const currentBookings = await (sql as any)(
-      `SELECT * FROM bookings WHERE staging_contract_id = $1 AND is_current = true AND active = true`,
-      [stagingContractId]
-    );
-
-    for (const cur of currentBookings) {
-      // Build per-row close-reason comment by diffing old values against incoming updates
-      const changeParts: string[] = [];
-      if (startTime !== cur.start_time) changeParts.push(`start_time changed from "${cur.start_time}" to "${startTime}"`);
-      if (endTime !== cur.end_time) changeParts.push(`end_time changed from "${cur.end_time}" to "${endTime}"`);
-      if (startDate !== undefined && startDate !== cur.date) changeParts.push(`start_date changed from "${cur.date}" to "${startDate}"`);
-      if (monthlyFee !== undefined && Number(monthlyFee) !== Number(cur.price_at_booking)) {
-        changeParts.push(`monthly_fee changed from "${cur.price_at_booking}" to "${monthlyFee}"`);
+    // Also update staging_contracts if linked
+    const booking = await db.getBookingById(contractBookingId);
+    if (booking?.stagingContractId) {
+      const stagingUpdates: string[] = ['start_time = $1', 'end_time = $2'];
+      const stagingParams: any[] = [updates.startTime, updates.endTime];
+      if (updates.startDate !== undefined) {
+        stagingParams.push(updates.startDate);
+        stagingUpdates.push(`start_date = $${stagingParams.length}`);
       }
-      const updateComment = changeParts.length > 0
-        ? `Row closed: ${changeParts.join('; ')}`
-        : 'Row closed: contract updated';
-
-      // Close the current version with audit comment
+      if (updates.monthlyFee !== undefined) {
+        stagingParams.push(updates.monthlyFee);
+        stagingUpdates.push(`monthly_contract_fee = $${stagingParams.length}`);
+      }
+      stagingParams.push(booking.stagingContractId);
       await (sql as any)(
-        `UPDATE bookings SET valid_to = NOW(), is_current = false, update_comments = $2 WHERE id = $1`,
-        [cur.id, updateComment]
-      );
-      // Insert new version with updated fields
-      const newId = generateId('bk');
-      await (sql as any)(
-        `INSERT INTO bookings (
-          id, society_service_id, household_id, maid_id, date, start_time, end_time, status,
-          start_otp, end_otp, is_recurring, frequency, custom_frequency_days, is_reviewed,
-          custom_price, custom_description, maid_requested_start, maid_requested_end, price_at_booking,
-          active, staging_contract_id, is_contract,
-          valid_from, valid_to, is_current, update_comments
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW(),NULL,true,NULL)`,
-        [
-          newId, cur.society_service_id, cur.household_id, cur.maid_id,
-          startDate !== undefined ? startDate : cur.date, startTime, endTime, cur.status,
-          cur.start_otp, cur.end_otp, cur.is_recurring, cur.frequency,
-          cur.custom_frequency_days, cur.is_reviewed,
-          cur.custom_price, cur.custom_description,
-          cur.maid_requested_start, cur.maid_requested_end,
-          monthlyFee !== undefined ? monthlyFee : cur.price_at_booking,
-          cur.active, cur.staging_contract_id, cur.is_contract,
-        ]
+        `UPDATE staging_contracts SET ${stagingUpdates.join(', ')} WHERE id = $${stagingParams.length}`,
+        stagingParams
       );
     }
-
-    // Update staging_contracts with all changed fields
-    const stagingUpdates: string[] = ['start_time = $1', 'end_time = $2'];
-    const stagingParams: any[] = [startTime, endTime];
-    if (startDate !== undefined) {
-      stagingParams.push(startDate);
-      stagingUpdates.push(`start_date = $${stagingParams.length}`);
-    }
-    if (monthlyFee !== undefined) {
-      stagingParams.push(monthlyFee);
-      stagingUpdates.push(`monthly_contract_fee = $${stagingParams.length}`);
-    }
-    stagingParams.push(stagingContractId);
-    await (sql as any)(
-      `UPDATE staging_contracts SET ${stagingUpdates.join(', ')} WHERE id = $${stagingParams.length}`,
-      stagingParams
-    );
   },
 
   // Save or update Expo push token for a user
@@ -1242,15 +1209,14 @@ export const db = {
   },
 
   getHouseholdInfoForContract: async (stagingContractId: string): Promise<{ householdPushToken: string | null; maidName: string } | null> => {
-    // Query via bookings (not staging_contracts) because staging_contracts.household_id / maid_id
-    // may be NULL if the upload pre-dates the resolved-ID columns, whereas bookings always carry them.
     const rows = await (sql as any)(
       `SELECT u_household.expo_push_token AS household_push_token, u_maid.name AS maid_name
        FROM bookings b
        JOIN users u_household ON b.household_id = u_household.id
        JOIN users u_maid ON b.maid_id = u_maid.id
        WHERE b.staging_contract_id = $1
-         AND b.is_contract = true
+         AND b.booking_type = 'CONTRACT'
+         AND b.eff_end_date = '3499-12-31'
        LIMIT 1`,
       [stagingContractId]
     );
@@ -1261,250 +1227,368 @@ export const db = {
     };
   },
 
-  // Returns all non-cancelled contracts for a maid (used for conflict detection).
-  // Filters to contracts whose 6-month window hasn't expired yet (start_date + 6 months > today).
-  // Uses status != 'CANCELLED' (not status = 'SUCCESS') to catch all active states.
-  getActiveContractsForMaid: async (maidId: string): Promise<Array<{ frequency: string; startTime: string; endTime: string }>> => {
+  // Returns all active contracts for a maid (used for conflict detection).
+  getActiveContractsForMaid: async (maidId: string): Promise<Array<{ id: string; frequency: string; startTime: string; endTime: string; workStartDate: string }>> => {
     const rows = await (sql as any)(
-      `SELECT frequency, start_time, end_time, start_date
-       FROM staging_contracts
+      `SELECT id, frequency, start_time, end_time, work_start_date
+       FROM bookings
        WHERE maid_id = $1
-         AND status != 'CANCELLED'`,
+         AND booking_type = 'CONTRACT'
+         AND eff_end_date = '3499-12-31'
+         AND status NOT IN ('CANCELLED', 'TERMINATED')`,
       [maidId]
     );
-    // Filter out expired contracts in application code (avoids any SQL date-cast edge cases)
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    const cutoff = sixMonthsAgo.toISOString().split('T')[0]; // YYYY-MM-DD
-    return rows
-      .filter((r: any) => r.start_date && r.start_date >= cutoff)
-      .map((r: any) => ({ frequency: r.frequency, startTime: r.start_time, endTime: r.end_time }));
+    return rows.map((r: any) => ({
+      id: r.id,
+      frequency: r.frequency,
+      startTime: r.start_time,
+      endTime: r.end_time,
+      workStartDate: r.work_start_date,
+    }));
   },
 
-  // When a maid books leave that conflicts with a specific contract date, create a visible
-  // CANCELLED booking row for that date so the household can see the cancellation.
-  // If a current booking already exists for that date, update it to CANCELLED.
-  // If no row exists yet (future pattern date), insert one using an existing booking as template.
-  createLeaveExceptionBooking: async (stagingContractId: string, date: string): Promise<void> => {
-    // Check for an existing is_current=true booking on that date
+  // When a maid books leave or cancels a contract session, create a REPLACEMENT record.
+  // Contract row is UNTOUCHED. The REPLACEMENT record starts as status='REQUESTED' with
+  // maid_id=original_maid (no replacement assigned yet).
+  // Accepts contractId (the booking id of the CONTRACT) and date (from calendar selection).
+  createLeaveExceptionBooking: async (contractId: string, date: string): Promise<Booking | null> => {
+    // Duplicate guard: check if a REPLACEMENT already exists for this contract+date
     const existing = await (sql as any)(
       `SELECT id FROM bookings
-       WHERE staging_contract_id = $1 AND date = $2 AND is_current = true
+       WHERE is_replacement_of = $1 AND work_start_date = $2
+         AND booking_type = 'REPLACEMENT' AND eff_end_date = '3499-12-31'
        LIMIT 1`,
-      [stagingContractId, date]
+      [contractId, date]
     );
     if (existing.length > 0) {
-      // Update the existing row to CANCELLED
-      await (sql as any)(
-        `UPDATE bookings
-         SET status = 'CANCELLED', active = false,
-             update_comments = 'Cancelled: maid leave'
-         WHERE id = $1`,
-        [existing[0].id]
-      );
-      return;
+      return db.getBookingById(existing[0].id);
     }
-    // No row exists for this date — use any existing booking as a template for IDs
+
+    // Get the contract record for template data
     const ref = await (sql as any)(
-      `SELECT society_service_id, household_id, maid_id, start_time, end_time, price_at_booking, custom_description
-       FROM bookings
-       WHERE staging_contract_id = $1 AND is_contract = true
-       LIMIT 1`,
-      [stagingContractId]
+      `SELECT * FROM bookings WHERE id = $1 AND booking_type = 'CONTRACT' AND eff_end_date = '3499-12-31' LIMIT 1`,
+      [contractId]
     );
-    if (ref.length === 0) return; // No reference booking found, nothing to do
-    const r = ref[0];
+    if (ref.length === 0) return null;
+    const contract = ref[0];
+
+    // Find the replacement society_service for this society
+    const householdRows = await (sql as any)(`SELECT society_id FROM users WHERE id = $1`, [contract.household_id]);
+    const societyId = householdRows[0]?.society_id;
+    const replacementSsId = societyId ? await db.findOrCreateReplacementSocietyService(societyId) : contract.society_service_id;
+
+    // Calculate replacement cost: hourly rate × duration hours
+    const ssRows = await (sql as any)(
+      `SELECT COALESCE(ss.price, s.base_price) as effective_price
+       FROM society_services ss LEFT JOIN services s ON ss.service_id = s.id
+       WHERE ss.id = $1`,
+      [replacementSsId]
+    );
+    const hourlyRate = ssRows.length > 0 ? Number(ssRows[0].effective_price) : 150;
+    const startH = parseInt(contract.start_time.split(':')[0]);
+    const endH = parseInt(contract.end_time.split(':')[0]);
+    const durationHours = Math.max(endH - startH, 1);
+    const replacementCost = hourlyRate * durationHours;
+
     const newId = generateId('bk');
     await (sql as any)(
       `INSERT INTO bookings (
-        id, society_service_id, household_id, maid_id, date, start_time, end_time,
-        status, is_recurring, is_contract, staging_contract_id, price_at_booking,
-        custom_description, active, is_current, valid_from
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,'CANCELLED',true,true,$8,$9,$10,false,true,NOW())
-      ON CONFLICT (id) DO NOTHING`,
-      [newId, r.society_service_id, r.household_id, r.maid_id, date, r.start_time, r.end_time,
-       stagingContractId, r.price_at_booking, r.custom_description]
-    );
-  },
-
-  // Assign a replacement maid to a CANCELLED booking.
-  // Adhoc: update maid_id in-place and restore CONFIRMED status.
-  // Contract: insert a new CONFIRMED booking row for the replacement maid; original CANCELLED row is kept as audit trail.
-  assignReplacementForBooking: async (bookingId: string, replacementMaidId: string): Promise<{ newBookingId: string | null; isContract: boolean }> => {
-    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1`, [bookingId]);
-    if (rows.length === 0) throw new Error(`Booking ${bookingId} not found`);
-    const orig = rows[0];
-
-    if (!orig.is_contract) {
-      // Adhoc: update in place
-      await (sql as any)(
-        `UPDATE bookings
-         SET maid_id = $2, status = 'CONFIRMED',
-             maid_requested_start = false, maid_requested_end = false,
-             start_otp = NULL, end_otp = NULL,
-             update_comments = 'Replacement maid assigned'
-         WHERE id = $1`,
-        [bookingId, replacementMaidId]
-      );
-      return { newBookingId: null, isContract: false };
-    }
-
-    // Contract: create new CONFIRMED booking for replacement maid.
-    // is_replacement = true prevents this appearing in the replacement maid's "My Contracts".
-    const newId = generateId('bk');
-    await (sql as any)(
-      `INSERT INTO bookings (
-        id, society_service_id, household_id, maid_id, date, start_time, end_time,
-        status, is_recurring, frequency, is_contract, is_replacement, staging_contract_id,
-        price_at_booking, custom_description, active, is_current, valid_from
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7,
-        'CONFIRMED', true, $8, true, true, $9,
-        $10, $11, true, true, NOW()
-      )`,
+        id, booking_type, is_replacement_of, society_service_id, household_id, maid_id,
+        work_start_date, work_end_date, start_time, end_time, status,
+        is_recurring, frequency, price_at_booking, update_comments
+      ) VALUES ($1, 'REPLACEMENT', $2, $3, $4, $5, $6, $6, $7, $8, 'REQUESTED', false, null, $9, $10)`,
       [
-        newId,
-        orig.society_service_id,
-        orig.household_id,
-        replacementMaidId,
-        orig.date,
-        orig.start_time,
-        orig.end_time,
-        orig.frequency,
-        orig.staging_contract_id,
-        orig.price_at_booking,
-        orig.custom_description,
+        newId, contractId, replacementSsId, contract.household_id, contract.maid_id,
+        date, contract.start_time, contract.end_time, replacementCost,
+        'Maid leave/cancellation',
       ]
     );
-    return { newBookingId: newId, isContract: true };
+    return db.getBookingById(newId);
   },
 
-  // Cancel all active bookings for a staging contract and mark it inactive
-  cancelContract: async (stagingContractId: string): Promise<void> => {
+  // Assign a replacement maid to a booking.
+  // Contract path: bookingId is a REPLACEMENT record — update maid_id in place.
+  // Adhoc path: bookingId is original ADHOC — close original, create REPLACEMENT record.
+  assignReplacementForBooking: async (bookingId: string, replacementMaidId: string): Promise<{ newBookingId: string | null; bookingType: BookingType }> => {
+    const rows = await (sql as any)(`SELECT * FROM bookings WHERE id = $1 AND eff_end_date = '3499-12-31'`, [bookingId]);
+    if (rows.length === 0) throw new Error(`Booking ${bookingId} not found or not active`);
+    const orig = rows[0];
+
+    // Check auto-accept for replacement maid
+    const maidRows = await (sql as any)(`SELECT auto_accept FROM users WHERE id = $1`, [replacementMaidId]);
+    const autoAccept = maidRows[0]?.auto_accept || false;
+    const newStatus = autoAccept ? 'CONFIRMED' : 'REQUESTED';
+
+    if (orig.booking_type === 'REPLACEMENT') {
+      // Contract session replacement: update the existing REPLACEMENT record
+      // Guard: must be REQUESTED or CANCELLED with original maid (no replacement currently assigned)
+      await (sql as any)(
+        `UPDATE bookings SET maid_id = $2, status = $3, auto_accepted = $4,
+                update_comments = $5
+         WHERE id = $1 AND eff_end_date = '3499-12-31'`,
+        [bookingId, replacementMaidId, newStatus, autoAccept,
+         `Replacement maid assigned${autoAccept ? ' (auto-accepted)' : ' (awaiting acceptance)'}`]
+      );
+      return { newBookingId: null, bookingType: 'REPLACEMENT' };
+    }
+
+    // Adhoc path: close original, create new REPLACEMENT record in a transaction-like sequence
+    // Close original adhoc
+    await (sql as any)(
+      `UPDATE bookings SET eff_end_date = NOW(), update_comments = 'Closed: replacement assigned'
+       WHERE id = $1 AND eff_end_date = '3499-12-31'`,
+      [bookingId]
+    );
+
+    // Create REPLACEMENT record
+    const newId = generateId('bk');
+    await (sql as any)(
+      `INSERT INTO bookings (
+        id, booking_type, is_replacement_of, society_service_id, household_id, maid_id,
+        work_start_date, work_end_date, start_time, end_time, status,
+        is_recurring, price_at_booking, custom_description, auto_accepted, update_comments
+      ) VALUES ($1, 'REPLACEMENT', $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11, $12, $13, $14)`,
+      [
+        newId, bookingId, orig.society_service_id, orig.household_id, replacementMaidId,
+        orig.work_start_date, orig.work_end_date, orig.start_time, orig.end_time, newStatus,
+        orig.price_at_booking, orig.custom_description, autoAccept,
+        `Replacement maid assigned for adhoc booking`,
+      ]
+    );
+    return { newBookingId: newId, bookingType: 'ADHOC' };
+  },
+
+  // Terminate a contract — close the contract record and all orphaned REPLACEMENT records
+  terminateContract: async (contractId: string): Promise<void> => {
+    // Close the contract booking
     await (sql as any)(
       `UPDATE bookings
-       SET status = 'CANCELLED', active = false, is_current = false, valid_to = NOW(),
-           update_comments = 'Row closed: contract cancelled'
-       WHERE staging_contract_id = $1 AND is_current = true AND active = true`,
-      [stagingContractId]
+       SET status = 'TERMINATED', eff_end_date = NOW(),
+           update_comments = 'Contract terminated'
+       WHERE id = $1 AND eff_end_date = '3499-12-31'`,
+      [contractId]
     );
+    // Close all open REPLACEMENT records for this contract
     await (sql as any)(
-      `UPDATE staging_contracts SET status = 'CANCELLED' WHERE id = $1`,
-      [stagingContractId]
+      `UPDATE bookings
+       SET status = 'TERMINATED', eff_end_date = NOW(),
+           update_comments = 'Terminated: parent contract terminated'
+       WHERE is_replacement_of = $1 AND booking_type = 'REPLACEMENT' AND eff_end_date = '3499-12-31'`,
+      [contractId]
     );
+    // Update staging_contracts if linked
+    const booking = await db.getBookingById(contractId);
+    if (booking?.stagingContractId) {
+      await (sql as any)(
+        `UPDATE staging_contracts SET status = 'CANCELLED' WHERE id = $1`,
+        [booking.stagingContractId]
+      );
+    }
   },
 
   getContractsForUser: async (userId: string, role: string): Promise<ContractGroup[]> => {
-    // Anchor on bookings (not staging_contracts) — one group per staging_contract_id.
-    // is_replacement = false ensures one-off replacement sessions don't create
-    // a separate contract group for the replacement maid.
+    // One row per CONTRACT booking. No grouping needed — each contract is a single row.
     const fieldName = role === 'MAID' ? 'b.maid_id' : 'b.household_id';
     const rows = await (sql as any)(
-      `SELECT sub.* FROM (
-        SELECT DISTINCT ON (b.staging_contract_id)
-          b.staging_contract_id,
-          b.frequency,
-          b.start_time,
-          b.end_time,
-          b.price_at_booking                                    AS monthly_contract_fee,
-          b.custom_description                                  AS job_description,
-          u_m.name                                              AS maid_name,
-          u_h.name                                              AS household_name,
-          u_h.address                                           AS household_address,
-          (SELECT MIN(b_s.date) FROM bookings b_s
-           WHERE b_s.staging_contract_id = b.staging_contract_id
-             AND b_s.is_replacement = false)                    AS eff_start_date,
-          (SELECT COUNT(*) FROM bookings b2
-           WHERE b2.staging_contract_id = b.staging_contract_id
-             AND b2.is_current    = true
-             AND b2.is_replacement = false)                     AS booking_count,
-          (SELECT ARRAY_AGG(b2.id ORDER BY b2.valid_from DESC)
-           FROM bookings b2
-           WHERE b2.staging_contract_id = b.staging_contract_id
-             AND b2.is_current    = true
-             AND b2.is_replacement = false)                     AS booking_ids,
-          (SELECT COALESCE(ss2.icon, svc2.icon)
-           FROM bookings b3
-           LEFT JOIN society_services ss2 ON b3.society_service_id = ss2.id
-           LEFT JOIN services        svc2 ON ss2.service_id        = svc2.id
-           WHERE b3.staging_contract_id = b.staging_contract_id
-             AND b3.is_current = true
-           LIMIT 1)                                             AS service_icon,
-          EXISTS (
-            SELECT 1 FROM bookings b4
-            WHERE b4.staging_contract_id = b.staging_contract_id
-              AND b4.is_current    = true
-              AND b4.active        = true
-              AND b4.is_replacement = false
-          )                                                     AS all_active
-        FROM bookings b
-        JOIN users u_m ON b.maid_id      = u_m.id
-        JOIN users u_h ON b.household_id = u_h.id
-        WHERE ${fieldName}             = $1
-          AND b.is_contract           = true
-          AND b.is_replacement        = false
-          AND b.is_current            = true
-          AND b.staging_contract_id  IS NOT NULL
-        ORDER BY b.staging_contract_id, b.valid_from DESC
-      ) sub
-      ORDER BY sub.eff_start_date DESC NULLS LAST`,
+      `SELECT
+        b.id,
+        b.frequency,
+        b.start_time,
+        b.end_time,
+        b.price_at_booking AS monthly_contract_fee,
+        b.custom_description AS job_description,
+        b.work_start_date,
+        b.work_end_date,
+        b.eff_start_date,
+        b.eff_end_date,
+        b.status,
+        b.staging_contract_id,
+        u_m.name AS maid_name,
+        u_h.name AS household_name,
+        u_h.address AS household_address,
+        COALESCE(ss.icon, svc.icon) AS service_icon
+      FROM bookings b
+      JOIN users u_m ON b.maid_id = u_m.id
+      JOIN users u_h ON b.household_id = u_h.id
+      LEFT JOIN society_services ss ON b.society_service_id = ss.id
+      LEFT JOIN services svc ON ss.service_id = svc.id
+      WHERE ${fieldName} = $1
+        AND b.booking_type = 'CONTRACT'
+        AND b.eff_end_date = '3499-12-31'
+      ORDER BY b.work_start_date DESC`,
       [userId]
     );
     return rows.map((r: any): ContractGroup => ({
-      stagingContractId: r.staging_contract_id,
+      id: r.id,
       frequency: r.frequency,
       startTime: r.start_time,
       endTime: r.end_time,
       monthlyContractFee: Number(r.monthly_contract_fee),
       jobDescription: r.job_description,
+      workStartDate: r.work_start_date,
+      workEndDate: r.work_end_date,
       effStartDate: r.eff_start_date,
-      active: Boolean(r.all_active),
+      effEndDate: r.eff_end_date,
+      status: r.status,
       maidName: r.maid_name,
       householdName: r.household_name,
       householdAddress: r.household_address,
-      bookingCount: Number(r.booking_count),
-      bookingIds: r.booking_ids || [],
       serviceIcon: r.service_icon,
+      stagingContractId: r.staging_contract_id,
     }));
   },
 
-  // Materialise a real booking row for a contract date that only existed as a virtual frontend entry.
-  // Called by request-otp when the booking ID starts with "virtual-".
-  // Returns the newly inserted (or pre-existing) booking.
-  materializeContractBooking: async (stagingContractId: string, date: string): Promise<Booking | null> => {
-    // Check for a pre-existing row (race-condition guard)
-    const existing = await (sql as any)(
-      `SELECT id FROM bookings
-       WHERE staging_contract_id = $1 AND date = $2 AND is_current = true AND is_contract = true
-       LIMIT 1`,
-      [stagingContractId, date]
-    );
-    if (existing.length > 0) return db.getBookingById(existing[0].id);
-
-    // Clone metadata from any existing booking in this contract
-    const ref = await (sql as any)(
-      `SELECT society_service_id, household_id, maid_id, start_time, end_time,
-              price_at_booking, custom_description, frequency
-       FROM bookings
-       WHERE staging_contract_id = $1 AND is_contract = true
-       LIMIT 1`,
-      [stagingContractId]
-    );
-    if (ref.length === 0) return null;
-    const r = ref[0];
-    const newId = generateId('bk');
+  // Terminate a single booking (adhoc or replacement) — set TERMINATED + close record
+  terminateBooking: async (id: string): Promise<void> => {
     await (sql as any)(
-      `INSERT INTO bookings (
-        id, society_service_id, household_id, maid_id, date, start_time, end_time,
-        status, is_recurring, frequency, is_contract, staging_contract_id,
-        price_at_booking, custom_description, active, is_current, valid_from
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,'CONFIRMED',true,$8,true,$9,$10,$11,true,true,NOW())`,
-      [
-        newId, r.society_service_id, r.household_id, r.maid_id, date,
-        r.start_time, r.end_time, r.frequency, stagingContractId,
-        r.price_at_booking, r.custom_description,
-      ]
+      `UPDATE bookings SET status = 'TERMINATED', eff_end_date = NOW(),
+              update_comments = 'Terminated by household'
+       WHERE id = $1 AND eff_end_date = '3499-12-31'`,
+      [id]
     );
-    return db.getBookingById(newId);
+  },
+
+  // Find or create the "Contract Replacement" society_service for a society
+  findOrCreateReplacementSocietyService: async (societyId: string): Promise<string> => {
+    const existing = await (sql as any)(
+      `SELECT id FROM society_services WHERE society_id = $1 AND service_id = 'srv-replacement-global'`,
+      [societyId]
+    );
+    if (existing.length > 0) return existing[0].id;
+    const id = generateId('ss');
+    await (sql as any)(
+      `INSERT INTO society_services (id, society_id, service_id, is_active)
+       VALUES ($1, $2, 'srv-replacement-global', true)`,
+      [id, societyId]
+    );
+    return id;
+  },
+
+  // Get available replacement maids for a booking's date/time slot
+  getAvailableReplacementMaids: async (bookingId: string): Promise<{
+    maids: Array<{ id: string; name: string; rating: number; trustScore: number; autoAccept: boolean; replacementCost: number }>;
+    hourlyRate: number; durationHours: number; isContractReplacement: boolean;
+  }> => {
+    // Get the booking (could be REPLACEMENT for contract, or ADHOC)
+    const booking = await db.getBookingById(bookingId);
+    if (!booking) throw new Error(`Booking ${bookingId} not found`);
+
+    const isContractReplacement = booking.bookingType === 'REPLACEMENT';
+    const date = booking.workStartDate;
+    const startTime = booking.startTime;
+    const endTime = booking.endTime;
+
+    // Get the society for this household
+    const householdRows = await (sql as any)(`SELECT society_id FROM users WHERE id = $1`, [booking.householdId]);
+    const societyId = householdRows[0]?.society_id;
+
+    // Determine the original maid to exclude
+    const originalMaidId = booking.maidId;
+
+    // Get day of week for frequency matching (MON, TUE, etc.)
+    const dateObj = new Date(date + 'T00:00:00');
+    const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const dayOfWeek = dayNames[dateObj.getDay()];
+
+    // Find available maids
+    const maids = await (sql as any)(
+      `SELECT u.id, u.name, u.auto_accept,
+              COALESCE((SELECT AVG(rating) FROM reviews WHERE maid_id = u.id), 0) as avg_rating,
+              ROUND(COALESCE(
+                CASE
+                  WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
+                   AND (SELECT COUNT(*) FROM (SELECT DISTINCT ON (b2.id) b2.status FROM bookings b2 WHERE b2.maid_id = u.id ORDER BY b2.id, b2.eff_end_date DESC) sub WHERE sub.status != 'REQUESTED') = 0
+                  THEN 50
+                  ELSE
+                    COALESCE((SELECT AVG(rating) FROM reviews WHERE maid_id = u.id), 0) / 5.0 * 60
+                    + 30
+                    + 10
+                END
+              , 50)) as trust_score
+       FROM users u
+       WHERE u.society_id = $1
+         AND u.role = 'MAID'
+         AND u.is_verified = true
+         AND u.id != $2
+         AND NOT EXISTS (
+           SELECT 1 FROM bookings b
+           WHERE b.maid_id = u.id
+             AND b.eff_end_date = '3499-12-31'
+             AND b.status NOT IN ('CANCELLED', 'TERMINATED')
+             AND (
+               (b.booking_type IN ('ADHOC', 'REPLACEMENT')
+                AND b.work_start_date = $3
+                AND b.start_time < $5 AND b.end_time > $4)
+               OR
+               (b.booking_type = 'CONTRACT'
+                AND b.work_start_date <= $3 AND b.work_end_date >= $3
+                AND b.start_time < $5 AND b.end_time > $4
+                AND (b.frequency = 'DAILY' OR $6 = ANY(string_to_array(b.frequency, ',')))
+                AND NOT EXISTS (
+                  SELECT 1 FROM bookings r
+                  WHERE r.is_replacement_of = b.id
+                    AND r.booking_type = 'REPLACEMENT'
+                    AND r.work_start_date = $3
+                    AND r.eff_end_date = '3499-12-31'
+                ))
+             )
+         )
+         AND NOT ($3::text = ANY(u.leaves))
+       ORDER BY u.auto_accept DESC,
+                (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) DESC,
+                u.id
+       LIMIT 10`,
+      [societyId, originalMaidId, date, startTime, endTime, dayOfWeek]
+    );
+
+    // Calculate pricing
+    let hourlyRate = 150;
+    let durationHours = 1;
+    const startH = parseInt(startTime.split(':')[0]);
+    const endH = parseInt(endTime.split(':')[0]);
+    durationHours = Math.max(endH - startH, 1);
+
+    if (isContractReplacement) {
+      const replacementSsId = societyId ? await db.findOrCreateReplacementSocietyService(societyId) : null;
+      if (replacementSsId) {
+        const ssRows = await (sql as any)(
+          `SELECT COALESCE(ss.price, s.base_price) as effective_price
+           FROM society_services ss LEFT JOIN services s ON ss.service_id = s.id WHERE ss.id = $1`,
+          [replacementSsId]
+        );
+        if (ssRows.length > 0) hourlyRate = Number(ssRows[0].effective_price);
+      }
+    }
+
+    return {
+      maids: maids.map((m: any) => ({
+        id: m.id,
+        name: m.name,
+        rating: Number(Number(m.avg_rating).toFixed(1)),
+        trustScore: Number(m.trust_score),
+        autoAccept: Boolean(m.auto_accept),
+        replacementCost: isContractReplacement ? hourlyRate * durationHours : Number(booking.priceAtBooking || 0),
+      })),
+      hourlyRate,
+      durationHours,
+      isContractReplacement,
+    };
+  },
+
+  // Batch-fetch REPLACEMENT records for a date range (used for calendar dots)
+  getReplacementsForDateRange: async (contractIds: string[], startDate: string, endDate: string): Promise<Booking[]> => {
+    if (contractIds.length === 0) return [];
+    const placeholders = contractIds.map((_: string, i: number) => `$${i + 3}`).join(',');
+    const rows = await (sql as any)(
+      `SELECT DISTINCT ON (b.id) b.*
+       FROM bookings b
+       WHERE b.booking_type = 'REPLACEMENT'
+         AND b.is_replacement_of IN (${placeholders})
+         AND b.work_start_date >= $1
+         AND b.work_start_date <= $2
+       ORDER BY b.id, b.eff_end_date DESC`,
+      [startDate, endDate, ...contractIds]
+    );
+    return rows.map(mapBooking);
   },
 };

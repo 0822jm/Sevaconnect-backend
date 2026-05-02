@@ -21,7 +21,7 @@ router.get('/user/:userId', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/bookings/contracts — grouped contract view for household or maid
+// GET /api/bookings/contracts — contract list for household or maid
 router.get('/contracts', async (req: Request, res: Response) => {
   try {
     const { userId, role } = req.query as { userId: string; role: string };
@@ -37,23 +37,26 @@ router.get('/contracts', async (req: Request, res: Response) => {
 });
 
 // POST /api/bookings/contract-leave-exception
-// Called when a maid books leave that conflicts with a recurring contract.
-// Sends a push notification to the household so they can arrange a replacement.
+// Called when a maid books leave that conflicts with a contract session.
+// Creates a REPLACEMENT record with status='REQUESTED'.
 router.post('/contract-leave-exception', async (req: Request, res: Response) => {
   try {
-    const { stagingContractId, date, leaveType } = req.body;
-    if (!stagingContractId || !date || !leaveType) {
-      res.status(400).json({ error: 'stagingContractId, date, and leaveType are required' });
+    const { contractId, date, leaveType } = req.body;
+    if (!contractId || !date) {
+      res.status(400).json({ error: 'contractId and date are required' });
       return;
     }
 
-    const info = await db.getHouseholdInfoForContract(stagingContractId);
-    if (!info) {
+    // Create REPLACEMENT record
+    const replacement = await db.createLeaveExceptionBooking(contractId, date);
+    if (!replacement) {
       res.status(404).json({ error: 'Contract not found' });
       return;
     }
 
-    if (info.householdPushToken) {
+    // Notify household
+    const info = await db.getNotificationInfoForBooking(replacement.id);
+    if (info?.householdPushToken) {
       const leaveDesc =
         leaveType === 'FULL'      ? 'the full day' :
         leaveType === 'MORNING'   ? 'the morning (8 AM – 12 PM)' :
@@ -65,17 +68,13 @@ router.post('/contract-leave-exception', async (req: Request, res: Response) => 
       );
     }
 
-    // Create a visible CANCELLED booking row for this date so the household calendar shows it
-    await db.createLeaveExceptionBooking(stagingContractId, date);
-
-    res.json({ success: true });
+    res.json({ success: true, replacementId: replacement.id });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// GET /api/bookings/contracts/check-conflict — checks if a maid has a conflicting active contract
-// Query params: maidId, frequency (DAILY or MON,WED,FRI), startTime (HH:MM), endTime (HH:MM)
+// GET /api/bookings/contracts/check-conflict
 router.get('/contracts/check-conflict', async (req: Request, res: Response) => {
   try {
     const { maidId, frequency, startTime, endTime } = req.query as {
@@ -91,13 +90,10 @@ router.get('/contracts/check-conflict', async (req: Request, res: Response) => {
     const newDays = newFreq === 'DAILY' ? null : new Set(newFreq.split(','));
 
     const hasConflict = activeContracts.some(contract => {
-      // Check day overlap
       const existingIsDailyOrNewIsDaily = newFreq === 'DAILY' || contract.frequency === 'DAILY';
       const daysConflict = existingIsDailyOrNewIsDaily ||
         (newDays !== null && contract.frequency.split(',').some(d => newDays.has(d)));
       if (!daysConflict) return false;
-
-      // Check time overlap: two ranges [s1,e1) and [s2,e2) overlap if s1 < e2 && s2 < e1
       return startTime < contract.endTime && contract.startTime < endTime;
     });
 
@@ -107,7 +103,7 @@ router.get('/contracts/check-conflict', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/bookings/contracts/create — household creates a contract from the app
+// POST /api/bookings/contracts/create — create a contract (one booking row)
 router.post('/contracts/create', async (req: Request, res: Response) => {
   try {
     const {
@@ -124,7 +120,6 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
       return;
     }
 
-    // Validate users exist, same society, correct roles
     const household = await db.getUserById(householdId);
     const maid = await db.getUserById(maidId);
     if (!household || household.role !== UserRole.HOUSEHOLD) {
@@ -143,7 +138,7 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
     const societyId = household.societyId;
     const freq = frequency.toUpperCase();
 
-    // Backend safety-net: reject if maid already has a conflicting active contract
+    // Conflict check
     const existingContracts = await db.getActiveContractsForMaid(maidId);
     const newDays = freq === 'DAILY' ? null : new Set(freq.split(','));
     const hasConflict = existingContracts.some(c => {
@@ -157,10 +152,8 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
       return;
     }
 
-    // Generate staging contract ID
+    // Create staging contract
     const stagingId = `sc-${Date.now()}`;
-
-    // Create staging_contract row
     await db.createStagingContract({
       id: stagingId,
       uploadUser: householdId,
@@ -180,70 +173,36 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
       societyId,
     });
 
-    // Find or create the Contract society_service for this society
     const societyServiceId = await db.findOrCreateContractSocietyService(societyId);
 
-    // Calculate end date: 6 months from startDate
-    const endDt = new Date(startDate);
-    endDt.setMonth(endDt.getMonth() + 6);
-    const endDate = endDt.toISOString().split('T')[0];
-
-    // Parse frequency → booking dates
-    const bookingDates: string[] = [];
-    if (freq === 'DAILY') {
-      // One booking per day for 7 days from start
-      const startDt = new Date(startDate);
-      for (let offset = 0; offset < 7; offset++) {
-        const d = new Date(startDt);
-        d.setDate(startDt.getDate() + offset);
-        bookingDates.push(d.toISOString().split('T')[0]);
-      }
-    } else {
-      const dayMap: Record<string, number> = { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 };
-      const targetDays = freq.split(',').map((d: string) => dayMap[d.trim()]).filter((d: number) => d !== undefined);
-      const startDt = new Date(startDate);
-      for (let offset = 0; offset < 7; offset++) {
-        const d = new Date(startDt);
-        d.setDate(startDt.getDate() + offset);
-        if (targetDays.includes(d.getDay())) {
-          bookingDates.push(d.toISOString().split('T')[0]);
-        }
-      }
-    }
-
-    // Create bookings
-    const createdBookingIds: string[] = [];
-    for (const bookingDate of bookingDates) {
-      const bk = await db.createBooking({
-        societyServiceId,
-        householdId,
-        maidId,
-        date: bookingDate,
-        startTime,
-        endTime,
-        isRecurring: true,
-        frequency: freq,
-        priceAtBooking: Number(monthlyFee),
-        customDescription: jobDescription || null,
-        isContract: true,
-        active: true,
-        effStartDate: startDate,
-        stagingContractId: stagingId,
-      });
-      createdBookingIds.push(bk.id);
-    }
+    // Create ONE booking row for the contract
+    const bk = await db.createBooking({
+      bookingType: 'CONTRACT',
+      societyServiceId,
+      householdId,
+      maidId,
+      workStartDate: startDate,
+      workEndDate: '3499-12-31',
+      startTime,
+      endTime,
+      isRecurring: true,
+      frequency: freq,
+      priceAtBooking: Number(monthlyFee),
+      customDescription: jobDescription || null,
+      stagingContractId: stagingId,
+      status: BookingStatus.CONFIRMED,
+    });
 
     // Notify maid
     if ((maid as any).expo_push_token) {
-      const householdName = household.name || 'A household';
       sendPushNotification(
         (maid as any).expo_push_token,
         'New Contract',
-        `${householdName} has created a contract with you starting ${startDate}`,
+        `${household.name || 'A household'} has created a contract with you starting ${startDate}`,
       );
     }
 
-    res.status(201).json({ stagingContractId: stagingId, bookingIds: createdBookingIds, endDate });
+    res.status(201).json({ contractId: bk.id, stagingContractId: stagingId });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -259,6 +218,23 @@ router.get('/society/:societyId', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/bookings/replacements — batch-fetch REPLACEMENT records for calendar dots
+router.get('/replacements', async (req: Request, res: Response) => {
+  try {
+    const contractIds = (req.query.contractIds as string || '').split(',').filter(Boolean);
+    const startDate = req.query.startDate as string;
+    const endDate = req.query.endDate as string;
+    if (!startDate || !endDate || contractIds.length === 0) {
+      res.json([]);
+      return;
+    }
+    const replacements = await db.getReplacementsForDateRange(contractIds, startDate, endDate);
+    res.json(replacements);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/bookings
 router.post('/', async (req: Request, res: Response) => {
   try {
@@ -269,9 +245,8 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-// PUT /api/bookings/contracts/:stagingContractId — household updates contract
-// MUST be defined before PUT /:id to avoid route shadowing
-router.put('/contracts/:stagingContractId', async (req: Request, res: Response) => {
+// PUT /api/bookings/contracts/:contractId — update contract (SCD2)
+router.put('/contracts/:contractId', async (req: Request, res: Response) => {
   try {
     const { startTime, endTime, startDate, monthlyFee } = req.body;
     if (!startTime || !endTime) {
@@ -283,34 +258,29 @@ router.put('/contracts/:stagingContractId', async (req: Request, res: Response) 
       res.status(400).json({ error: 'startTime and endTime must be in HH:MM format' });
       return;
     }
-    if (startDate && !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-      res.status(400).json({ error: 'startDate must be in YYYY-MM-DD format' });
-      return;
-    }
-    if (monthlyFee !== undefined && (isNaN(Number(monthlyFee)) || Number(monthlyFee) <= 0)) {
-      res.status(400).json({ error: 'monthlyFee must be a positive number' });
-      return;
-    }
-    await db.updateContract(req.params.stagingContractId, {
+    await db.updateContract(req.params.contractId, {
       startTime,
       endTime,
       startDate: startDate || undefined,
       monthlyFee: monthlyFee !== undefined ? Number(monthlyFee) : undefined,
     });
 
-    // Notify maid about the contract update (fire-and-forget)
-    db.getMaidInfoForContract(req.params.stagingContractId).then(info => {
-      if (info?.maidPushToken) {
-        const changes: string[] = [`Time: ${startTime}–${endTime}`];
-        if (startDate) changes.push(`Start date: ${startDate}`);
-        if (monthlyFee !== undefined) changes.push(`Fee: ₹${Math.round(Number(monthlyFee))}`);
-        sendPushNotification(
-          info.maidPushToken,
-          'Contract Updated',
-          `${info.householdName} has updated your contract. ${changes.join(', ')}.`,
-        );
-      }
-    }).catch(() => {});
+    // Notify maid
+    const booking = await db.getBookingById(req.params.contractId);
+    if (booking?.stagingContractId) {
+      db.getMaidInfoForContract(booking.stagingContractId).then(info => {
+        if (info?.maidPushToken) {
+          const changes: string[] = [`Time: ${startTime}–${endTime}`];
+          if (startDate) changes.push(`Start date: ${startDate}`);
+          if (monthlyFee !== undefined) changes.push(`Fee: ₹${Math.round(Number(monthlyFee))}`);
+          sendPushNotification(
+            info.maidPushToken,
+            'Contract Updated',
+            `${info.householdName} has updated your contract. ${changes.join(', ')}.`,
+          );
+        }
+      }).catch(() => {});
+    }
 
     res.json({ success: true });
   } catch (e: any) {
@@ -318,33 +288,36 @@ router.put('/contracts/:stagingContractId', async (req: Request, res: Response) 
   }
 });
 
-// DELETE /api/bookings/contracts/:stagingContractId — cancel contract
-// Pass ?cancelledBy=MAID when the maid initiates cancellation (notifies household instead)
-// MUST be defined before DELETE /:id if added in future
-router.delete('/contracts/:stagingContractId', async (req: Request, res: Response) => {
+// DELETE /api/bookings/contracts/:contractId — terminate contract
+router.delete('/contracts/:contractId', async (req: Request, res: Response) => {
   try {
     const cancelledByMaid = req.query.cancelledBy === 'MAID';
+    const booking = await db.getBookingById(req.params.contractId);
+    if (!booking) {
+      res.status(404).json({ error: 'Contract not found' });
+      return;
+    }
 
     if (cancelledByMaid) {
-      // Fetch household info before cancelling to send push notification
-      const info = await db.getHouseholdInfoForContract(req.params.stagingContractId).catch(() => null);
-      await db.cancelContract(req.params.stagingContractId);
+      const info = await db.getNotificationInfoForBooking(req.params.contractId);
+      await db.terminateContract(req.params.contractId);
       if (info?.householdPushToken) {
         sendPushNotification(
           info.householdPushToken,
-          'Contract Cancelled',
-          `Your contract with ${info.maidName} has been cancelled by the maid.`,
+          'Contract Terminated',
+          `Your contract with ${info.maidName} has been terminated by the maid.`,
         );
       }
     } else {
-      // Household cancels — notify maid
-      const info = await db.getMaidInfoForContract(req.params.stagingContractId).catch(() => null);
-      await db.cancelContract(req.params.stagingContractId);
+      const info = booking.stagingContractId
+        ? await db.getMaidInfoForContract(booking.stagingContractId).catch(() => null)
+        : null;
+      await db.terminateContract(req.params.contractId);
       if (info?.maidPushToken) {
         sendPushNotification(
           info.maidPushToken,
-          'Contract Cancelled',
-          `Your contract with ${info.householdName} has been cancelled.`,
+          'Contract Terminated',
+          `Your contract with ${info.householdName} has been terminated.`,
         );
       }
     }
@@ -355,10 +328,31 @@ router.delete('/contracts/:stagingContractId', async (req: Request, res: Respons
   }
 });
 
+// GET /api/bookings/:id/available-replacements
+router.get('/:id/available-replacements', async (req: Request, res: Response) => {
+  try {
+    const booking = await db.getBookingById(req.params.id);
+    if (!booking) {
+      res.status(404).json({ error: 'Booking not found' });
+      return;
+    }
+    // Eligibility check
+    const isEligible =
+      (booking.bookingType === 'ADHOC' && booking.status === BookingStatus.CANCELLED && booking.effEndDate?.includes('3499')) ||
+      (booking.bookingType === 'REPLACEMENT' && ['REQUESTED', 'CANCELLED'].includes(booking.status) && booking.effEndDate?.includes('3499'));
+    if (!isEligible) {
+      res.status(400).json({ error: 'Booking is not eligible for replacement assignment' });
+      return;
+    }
+
+    const result = await db.getAvailableReplacementMaids(req.params.id);
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // PUT /api/bookings/:id/assign-replacement
-// Assigns a replacement maid to a CANCELLED booking.
-// Adhoc: updates maid_id in place and restores CONFIRMED status.
-// Contract: creates a new CONFIRMED booking row for the replacement maid; original CANCELLED row kept as audit.
 router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
   try {
     const { replacementMaidId } = req.body;
@@ -371,16 +365,16 @@ router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Booking not found' });
       return;
     }
-    if (booking.status !== BookingStatus.CANCELLED) {
-      // For CONFIRMED contract sessions: auto-cancel first, then assign replacement.
-      // This supports the proactive case where the household reassigns before the maid
-      // has formally requested leave.
-      if (!booking.isContract || booking.status !== BookingStatus.CONFIRMED) {
-        res.status(400).json({ error: 'Can only assign a replacement for a CANCELLED booking' });
-        return;
-      }
-      await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED);
+
+    // Eligibility: ADHOC with CANCELLED status (open), or REPLACEMENT with REQUESTED/CANCELLED
+    const isEligible =
+      (booking.bookingType === 'ADHOC' && booking.status === BookingStatus.CANCELLED && booking.effEndDate?.includes('3499')) ||
+      (booking.bookingType === 'REPLACEMENT' && ['REQUESTED', 'CANCELLED'].includes(booking.status) && booking.effEndDate?.includes('3499'));
+    if (!isEligible) {
+      res.status(409).json({ error: 'Booking is not eligible for replacement assignment' });
+      return;
     }
+
     const replacementMaid = await db.getUserById(replacementMaidId);
     if (!replacementMaid || replacementMaid.role !== UserRole.MAID) {
       res.status(400).json({ error: 'Invalid replacement maid' });
@@ -389,15 +383,15 @@ router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
 
     const result = await db.assignReplacementForBooking(req.params.id, replacementMaidId);
 
-    // Notify the replacement maid
+    // Notify replacement maid
     const pushToken = (replacementMaid as any).expo_push_token;
     if (pushToken) {
-      const dateLabel = new Date(booking.date + 'T00:00').toLocaleDateString('en-IN', {
+      const dateLabel = new Date(booking.workStartDate + 'T00:00').toLocaleDateString('en-IN', {
         weekday: 'short', day: 'numeric', month: 'short',
       });
       sendPushNotification(
         pushToken,
-        result.isContract ? 'Contract Session Assigned' : 'New Booking Assigned',
+        result.bookingType === 'REPLACEMENT' ? 'Contract Session Assigned' : 'New Booking Assigned',
         `You have been assigned as a replacement helper on ${dateLabel} at ${booking.startTime}.`,
       );
     }
@@ -408,18 +402,32 @@ router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
   }
 });
 
-// PUT /api/bookings/:id
+// PUT /api/bookings/:id — material update (SCD2 for non-status changes)
 router.put('/:id', async (req: Request, res: Response) => {
   try {
     const booking = await db.getBookingById(req.params.id);
-    if (booking?.isContract) {
-      // SCD Type 2: close old version, insert new row with updates
-      const newId = await db.scdUpdateBooking(req.params.id, req.body);
-      res.json({ success: true, newId });
-    } else {
-      await db.updateBooking(req.params.id, req.body);
-      res.json({ success: true });
+    if (!booking) {
+      res.status(404).json({ error: 'Booking not found' });
+      return;
     }
+
+    // Reject maid_id changes on CONTRACT
+    if (booking.bookingType === 'CONTRACT' && req.body.maidId && req.body.maidId !== booking.maidId) {
+      res.status(400).json({ error: 'Cannot change maid on a contract. Terminate and create a new one.' });
+      return;
+    }
+
+    // Status-only changes are in-place
+    const nonStatusKeys = Object.keys(req.body).filter(k => k !== 'status');
+    if (nonStatusKeys.length === 0 && req.body.status) {
+      await db.updateBookingStatus(req.params.id, req.body.status);
+      res.json({ success: true });
+      return;
+    }
+
+    // Material changes → SCD2
+    const newId = await db.scdUpdateBooking(req.params.id, req.body);
+    res.json({ success: true, id: newId });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -428,71 +436,101 @@ router.put('/:id', async (req: Request, res: Response) => {
 // PUT /api/bookings/:id/status
 router.put('/:id/status', async (req: Request, res: Response) => {
   try {
-    const { status } = req.body;
+    const { status, date } = req.body;
     const booking = await db.getBookingById(req.params.id);
-    if (booking?.isContract && status === BookingStatus.COMPLETED) {
-      // SCD Type 2: contract ended — close current version with COMPLETED status
-      const newId = await db.scdUpdateBooking(req.params.id, { status: BookingStatus.COMPLETED, active: false });
-      res.json({ success: true, newId });
-    } else {
-      await db.updateBookingStatus(req.params.id, status as BookingStatus);
+    if (!booking) {
+      res.status(404).json({ error: 'Booking not found' });
+      return;
+    }
 
-      // Notify household when their booking is cancelled or rejected by the maid
-      if (status === BookingStatus.CANCELLED || status === BookingStatus.REJECTED) {
-        const info = await db.getNotificationInfoForBooking(req.params.id);
+    if (status === BookingStatus.CANCELLED) {
+      // Maid cancels
+      if (booking.bookingType === 'CONTRACT') {
+        // Contract session cancellation — requires date (calendar-selected)
+        if (!date) {
+          res.status(400).json({ error: 'date is required for contract session cancellation' });
+          return;
+        }
+        const replacement = await db.createLeaveExceptionBooking(booking.id, date);
+        // Notify household
+        const info = await db.getNotificationInfoForBooking(replacement?.id || booking.id);
         if (info?.householdPushToken) {
-          const dateLabel = booking?.date
-            ? new Date(booking.date + 'T00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })
-            : 'your booking';
           sendPushNotification(
             info.householdPushToken,
-            'Booking Cancelled – Replacement Needed',
-            `${info.maidName} cancelled ${info.serviceName} on ${dateLabel}. Please arrange a replacement helper.`,
+            'Contract – Replacement Needed',
+            `${info.maidName} cancelled the session on ${date}. Please arrange a replacement.`,
           );
+        }
+        res.json({ success: true, replacementId: replacement?.id });
+        return;
+      }
+      // Adhoc or Replacement cancellation — status in-place, record stays open
+      await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED);
+
+      // For REPLACEMENT bookings: reset maid_id to original maid (chain cancellation)
+      if (booking.bookingType === 'REPLACEMENT' && booking.isReplacementOf) {
+        const origContract = await db.getBookingById(booking.isReplacementOf);
+        if (origContract) {
+          await db.updateBooking(req.params.id, { maidId: origContract.maidId } as any);
         }
       }
 
+      // Notify household
+      const info = await db.getNotificationInfoForBooking(req.params.id);
+      if (info?.householdPushToken) {
+        const dateLabel = new Date(booking.workStartDate + 'T00:00').toLocaleDateString('en-IN', {
+          weekday: 'short', day: 'numeric', month: 'short',
+        });
+        sendPushNotification(
+          info.householdPushToken,
+          'Booking Cancelled – Replacement Needed',
+          `${info.maidName} cancelled ${info.serviceName} on ${dateLabel}. Please arrange a replacement helper.`,
+        );
+      }
       res.json({ success: true });
+      return;
     }
+
+    if (status === BookingStatus.TERMINATED) {
+      // Household/admin terminates
+      if (booking.bookingType === 'CONTRACT') {
+        await db.terminateContract(booking.id);
+      } else {
+        // Adhoc or Replacement termination — close the record
+        await db.terminateBooking(req.params.id);
+      }
+      res.json({ success: true });
+      return;
+    }
+
+    // All other status changes — in-place update
+    await db.updateBookingStatus(req.params.id, status as BookingStatus);
+    res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
 
 // POST /api/bookings/:id/request-otp
-// Maid requests OTP → for contracts, auto-advance status without OTP exchange.
-// Virtual contract IDs (virtual-{stagingContractId}-{date}) are materialised on first tap.
+// Contracts auto-advance (no OTP). REPLACEMENT bookings use OTP flow.
 router.post('/:id/request-otp', async (req: Request, res: Response) => {
   try {
     const { type } = req.body; // 'start' | 'end'
-    let booking = await db.getBookingById(req.params.id);
-
-    // Virtual contract booking — materialise a real DB row on first Start Work tap
-    if (!booking && req.params.id.startsWith('virtual-')) {
-      const withoutPrefix = req.params.id.slice('virtual-'.length); // "{stagingContractId}-{YYYY-MM-DD}"
-      const date = withoutPrefix.slice(-10);                         // last 10 chars = YYYY-MM-DD
-      const stagingContractId = withoutPrefix.slice(0, -(10 + 1));  // everything before the trailing "-{date}"
-      booking = await db.materializeContractBooking(stagingContractId, date);
-      if (!booking) {
-        res.status(404).json({ error: 'Contract not found for virtual booking' });
-        return;
-      }
+    const booking = await db.getBookingById(req.params.id);
+    if (!booking) {
+      res.status(404).json({ error: 'Booking not found' });
+      return;
     }
 
-    if (booking?.isContract) {
+    if (booking.bookingType === 'CONTRACT') {
       // Auto-advance status — no OTP needed
       const nextStatus = type === 'start' ? BookingStatus.IN_PROGRESS : BookingStatus.COMPLETED;
-      if (nextStatus === BookingStatus.COMPLETED) {
-        // SCD Type 2 on contract end
-        await db.scdUpdateBooking(booking.id, { status: BookingStatus.COMPLETED, active: false });
-      } else {
-        await db.updateBookingStatus(booking.id, nextStatus);
-      }
-      // Return the real booking ID so the client can update its local state
+      await db.updateBookingStatus(booking.id, nextStatus);
       res.json({ success: true, status: nextStatus, autoAdvanced: true, bookingId: booking.id });
       return;
     }
 
+    // ADHOC and REPLACEMENT use OTP flow
     const otp = await db.setOtpRequested(req.params.id, type);
     console.log(`[OTP] Generated ${type} OTP for booking ${req.params.id}: ${otp}`);
     res.json({ success: true });
@@ -506,7 +544,7 @@ router.post('/:id/cancel-otp', async (req: Request, res: Response) => {
   try {
     const { type } = req.body;
     const booking = await db.getBookingById(req.params.id);
-    if (booking?.isContract) {
+    if (booking?.bookingType === 'CONTRACT') {
       res.status(400).json({ error: 'OTP operations are not applicable for contract bookings.' });
       return;
     }
@@ -518,17 +556,15 @@ router.post('/:id/cancel-otp', async (req: Request, res: Response) => {
 });
 
 // POST /api/bookings/:id/verify-otp
-// Maid submits code → verified against stored value in DB (no Twilio)
 router.post('/:id/verify-otp', async (req: Request, res: Response) => {
   try {
-    const { code, type } = req.body; // type: 'start' | 'end'
+    const { code, type } = req.body;
     const booking = await db.getBookingById(req.params.id);
-    if (booking?.isContract) {
+    if (booking?.bookingType === 'CONTRACT') {
       res.status(400).json({ error: 'OTP verification is not applicable for contract bookings.' });
       return;
     }
     const masterOtp = process.env.TWILIO_MASTER_OTP || '1234';
-
     const isValid = code === masterOtp || await db.verifyStoredOtp(req.params.id, type, code);
 
     if (isValid) {
@@ -544,12 +580,11 @@ router.post('/:id/verify-otp', async (req: Request, res: Response) => {
 });
 
 // POST /api/bookings/:id/generate-otp
-// Household can regenerate a new 4-digit code if needed
 router.post('/:id/generate-otp', async (req: Request, res: Response) => {
   try {
     const { type } = req.body;
     const booking = await db.getBookingById(req.params.id);
-    if (booking?.isContract) {
+    if (booking?.bookingType === 'CONTRACT') {
       res.status(400).json({ error: 'OTP generation is not applicable for contract bookings.' });
       return;
     }

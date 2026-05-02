@@ -219,47 +219,24 @@ router.post('/', upload.single('file'), async (req: Request, res: Response) => {
       // Find or create the Contract society_service for this society
       const societyServiceId = await db.findOrCreateContractSocietyService(societyId);
 
-      // Parse frequency → list of (date, startTime, endTime) bookings
-      // For DAILY → single booking on start_date
-      // For MON,WED,FRI → one booking per matching day in the first 7 days from start_date
-      const bookingDates: string[] = [];
-      if (freq === 'DAILY') {
-        bookingDates.push(row.start_date.trim());
-      } else {
-        const dayMap: Record<string, number> = {
-          SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6,
-        };
-        const targetDays = freq.split(',').map(d => dayMap[d.trim()]).filter(d => d !== undefined);
-        const startDt = new Date(row.start_date.trim());
-        // Collect next occurrence of each target day within the next 7 days
-        for (let offset = 0; offset < 7; offset++) {
-          const d = new Date(startDt);
-          d.setDate(startDt.getDate() + offset);
-          if (targetDays.includes(d.getDay())) {
-            bookingDates.push(d.toISOString().split('T')[0]);
-          }
-        }
-      }
-
-      for (const bookingDate of bookingDates) {
-        const bk = await db.createBooking({
-          societyServiceId,
-          householdId: householdUser.id,
-          maidId: maidUser.id,
-          date: bookingDate,
-          startTime: row.start_time.trim(),
-          endTime: row.end_time.trim(),
-          isRecurring: true,
-          frequency: freq,
-          priceAtBooking: Number(row.monthly_contract_fee),
-          customDescription: row.job_description?.trim() || null,
-          isContract: true,
-          active: true,
-          effStartDate: row.start_date.trim(),
-          stagingContractId: stagingId,
-        });
-        createdBookingIds.push(bk.id);
-      }
+      // Create ONE booking row per CSV row (contract = single row, not 7)
+      const bk = await db.createBooking({
+        bookingType: 'CONTRACT',
+        societyServiceId,
+        householdId: householdUser.id,
+        maidId: maidUser.id,
+        workStartDate: row.start_date.trim(),
+        workEndDate: '3499-12-31',
+        startTime: row.start_time.trim(),
+        endTime: row.end_time.trim(),
+        isRecurring: true,
+        frequency: freq,
+        priceAtBooking: Number(row.monthly_contract_fee),
+        customDescription: row.job_description?.trim() || null,
+        stagingContractId: stagingId,
+        status: 'CONFIRMED',
+      });
+      createdBookingIds.push(bk.id);
 
       successCount++;
     }
