@@ -802,7 +802,7 @@ export const db = {
         WHERE b.${fieldName} = $1
         ORDER BY b.id, b.eff_end_date DESC
       ) sub
-      JOIN users m ON sub.maid_id = m.id
+      LEFT JOIN users m ON sub.maid_id = m.id
       JOIN users h ON sub.household_id = h.id
       LEFT JOIN society_services ss ON sub.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
@@ -827,7 +827,7 @@ export const db = {
         WHERE h2.society_id = $1
         ORDER BY b.id, b.eff_end_date DESC
       ) sub
-      JOIN users m ON sub.maid_id = m.id
+      LEFT JOIN users m ON sub.maid_id = m.id
       JOIN users h ON sub.household_id = h.id
       LEFT JOIN society_services ss ON sub.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
@@ -882,7 +882,7 @@ export const db = {
   },
 
   updateBooking: async (id: string, updates: Partial<Booking>): Promise<void> => {
-    const allowedKeys = ['startTime', 'endTime', 'status', 'startOtp', 'endOtp', 'customPrice'];
+    const allowedKeys = ['startTime', 'endTime', 'status', 'startOtp', 'endOtp', 'customPrice', 'maidId'];
     const entries = Object.entries(updates).filter(([key]) => allowedKeys.includes(key));
     if (entries.length === 0) return;
 
@@ -1194,7 +1194,7 @@ export const db = {
               COALESCE(ss.name->>'en', svc.name->>'en', 'Service') AS service_name
        FROM bookings b
        JOIN users u_household ON b.household_id = u_household.id
-       JOIN users u_maid ON b.maid_id = u_maid.id
+       LEFT JOIN users u_maid ON b.maid_id = u_maid.id
        LEFT JOIN society_services ss ON b.society_service_id = ss.id
        LEFT JOIN services svc ON ss.service_id = svc.id
        WHERE b.id = $1`,
@@ -1248,8 +1248,9 @@ export const db = {
   },
 
   // When a maid books leave or cancels a contract session, create a REPLACEMENT record.
-  // Contract row is UNTOUCHED. The REPLACEMENT record starts as status='REQUESTED' with
-  // maid_id=original_maid (no replacement assigned yet).
+  // Contract row is UNTOUCHED. The REPLACEMENT starts as status='REQUESTED' with
+  // maid_id=NULL — meaning "this session needs a replacement; no maid assigned yet".
+  // The household assigns a maid via assignReplacementForBooking, which sets maid_id.
   // Accepts contractId (the booking id of the CONTRACT) and date (from calendar selection).
   createLeaveExceptionBooking: async (contractId: string, date: string): Promise<Booking | null> => {
     // Duplicate guard: check if a REPLACEMENT already exists for this contract+date
@@ -1296,11 +1297,11 @@ export const db = {
         id, booking_type, is_replacement_of, society_service_id, household_id, maid_id,
         work_start_date, work_end_date, start_time, end_time, status,
         is_recurring, frequency, price_at_booking, update_comments
-      ) VALUES ($1, 'REPLACEMENT', $2, $3, $4, $5, $6, $6, $7, $8, 'REQUESTED', false, null, $9, $10)`,
+      ) VALUES ($1, 'REPLACEMENT', $2, $3, $4, NULL, $5, $5, $6, $7, 'REQUESTED', false, null, $8, $9)`,
       [
-        newId, contractId, replacementSsId, contract.household_id, contract.maid_id,
+        newId, contractId, replacementSsId, contract.household_id,
         date, contract.start_time, contract.end_time, replacementCost,
-        'Maid leave/cancellation',
+        'Maid leave/cancellation — awaiting replacement assignment',
       ]
     );
     return db.getBookingById(newId);
@@ -1482,8 +1483,14 @@ export const db = {
     const householdRows = await (sql as any)(`SELECT society_id FROM users WHERE id = $1`, [booking.householdId]);
     const societyId = householdRows[0]?.society_id;
 
-    // Determine the original maid to exclude
-    const originalMaidId = booking.maidId;
+    // Determine the original maid to exclude.
+    // For contract-leave REPLACEMENTs, maid_id is NULL until assignment, so we look up
+    // the parent contract's maid via is_replacement_of.
+    let originalMaidId: string | null = booking.maidId || null;
+    if (!originalMaidId && booking.isReplacementOf) {
+      const parent = await db.getBookingById(booking.isReplacementOf);
+      originalMaidId = parent?.maidId || null;
+    }
 
     // Get day of week for frequency matching (MON, TUE, etc.)
     const dateObj = new Date(date + 'T00:00:00');
@@ -1509,7 +1516,7 @@ export const db = {
        WHERE u.society_id = $1
          AND u.role = 'MAID'
          AND u.is_verified = true
-         AND u.id != $2
+         AND ($2::text IS NULL OR u.id != $2)
          AND NOT EXISTS (
            SELECT 1 FROM bookings b
            WHERE b.maid_id = u.id

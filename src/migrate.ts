@@ -448,6 +448,31 @@ async function migrate() {
   }
   console.log('✓ Seeded 17 test user accounts');
 
+  // Step 26: Allow NULL maid_id on bookings — REPLACEMENT rows are created at maid-leave
+  // time with maid_id=NULL ("needs replacement; no maid assigned") and only get a maid_id
+  // once the household assigns one via assignReplacementForBooking.
+  await sql(`ALTER TABLE bookings ALTER COLUMN maid_id DROP NOT NULL`, []);
+  console.log('✓ Allowed NULL on bookings.maid_id (pending-replacement state)');
+
+  // Backfill: clear maid_id on any existing REPLACEMENT-REQUESTED rows whose maid_id
+  // still points at the parent's maid (i.e., createLeaveExceptionBooking-style rows
+  // from before this change). Leave assigned/auto-accepted rows alone.
+  await sql(
+    `UPDATE bookings b
+       SET maid_id = NULL
+     WHERE b.booking_type = 'REPLACEMENT'
+       AND b.status = 'REQUESTED'
+       AND b.eff_end_date = '3499-12-31'
+       AND b.is_replacement_of IS NOT NULL
+       AND b.maid_id IS NOT NULL
+       AND b.maid_id = (
+         SELECT p.maid_id FROM bookings p
+         WHERE p.id = b.is_replacement_of AND p.eff_end_date = '3499-12-31'
+       )`,
+    []
+  );
+  console.log('✓ Backfilled NULL maid_id on pending-replacement rows');
+
   console.log('\n=== Migration complete! ===');
 }
 

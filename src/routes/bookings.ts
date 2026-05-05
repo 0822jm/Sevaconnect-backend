@@ -467,12 +467,10 @@ router.put('/:id/status', async (req: Request, res: Response) => {
       // Adhoc or Replacement cancellation — status in-place, record stays open
       await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED);
 
-      // For REPLACEMENT bookings: reset maid_id to original maid (chain cancellation)
+      // For REPLACEMENT bookings: clear maid_id so the slot returns to "needs replacement"
+      // state and stops appearing on the cancelling maid's request feed.
       if (booking.bookingType === 'REPLACEMENT' && booking.isReplacementOf) {
-        const origContract = await db.getBookingById(booking.isReplacementOf);
-        if (origContract) {
-          await db.updateBooking(req.params.id, { maidId: origContract.maidId } as any);
-        }
+        await db.updateBooking(req.params.id, { maidId: null } as any);
       }
 
       // Notify household
