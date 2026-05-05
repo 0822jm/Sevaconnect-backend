@@ -299,8 +299,8 @@ const mapBooking = (row: any): Booking => ({
   autoAccepted: row.auto_accepted ? Boolean(row.auto_accepted) : false,
   // SCD2 fields
   stagingContractId: row.staging_contract_id,
-  effStartDate: row.eff_start_date,
-  effEndDate: row.eff_end_date,
+  effStartDate: row.eff_start_date instanceof Date ? row.eff_start_date.toISOString().substring(0, 10) : row.eff_start_date,
+  effEndDate: row.eff_end_date instanceof Date ? row.eff_end_date.toISOString().substring(0, 10) : row.eff_end_date,
   updateComments: row.update_comments ?? null,
   createdAt: row.created_at,
 });
@@ -1427,8 +1427,8 @@ export const db = {
       jobDescription: r.job_description,
       workStartDate: r.work_start_date instanceof Date ? r.work_start_date.toISOString().substring(0, 10) : r.work_start_date ? String(r.work_start_date).substring(0, 10) : '',
       workEndDate: r.work_end_date instanceof Date ? r.work_end_date.toISOString().substring(0, 10) : r.work_end_date ? String(r.work_end_date).substring(0, 10) : '',
-      effStartDate: r.eff_start_date,
-      effEndDate: r.eff_end_date,
+      effStartDate: r.eff_start_date instanceof Date ? r.eff_start_date.toISOString().substring(0, 10) : r.eff_start_date,
+      effEndDate: r.eff_end_date instanceof Date ? r.eff_end_date.toISOString().substring(0, 10) : r.eff_end_date,
       status: r.status,
       maidName: r.maid_name,
       householdName: r.household_name,
