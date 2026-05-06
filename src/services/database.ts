@@ -1485,14 +1485,16 @@ export const db = {
     const householdRows = await (sql as any)(`SELECT society_id FROM users WHERE id = $1`, [booking.householdId]);
     const societyId = householdRows[0]?.society_id;
 
-    // Determine the original maid to exclude.
-    // For contract-leave REPLACEMENTs, maid_id is NULL until assignment, so we look up
-    // the parent contract's maid via is_replacement_of.
-    let originalMaidId: string | null = booking.maidId || null;
-    if (!originalMaidId && booking.isReplacementOf) {
+    // Build exclusion list: the maid on this booking (canceller if REPLACEMENT/ADHOC)
+    // plus the original contract maid (via is_replacement_of). Both must be excluded so
+    // a second-round replacement picker doesn't surface either of them.
+    const excludeSet = new Set<string>();
+    if (booking.maidId) excludeSet.add(booking.maidId);
+    if (booking.isReplacementOf) {
       const parent = await db.getBookingById(booking.isReplacementOf);
-      originalMaidId = parent?.maidId || null;
+      if (parent?.maidId) excludeSet.add(parent.maidId);
     }
+    const excludeArray = [...excludeSet];
 
     // Get day of week for frequency matching (MON, TUE, etc.)
     const dateObj = new Date(date + 'T00:00:00');
@@ -1518,7 +1520,7 @@ export const db = {
        WHERE u.society_id = $1
          AND u.role = 'MAID'
          AND u.is_verified = true
-         AND ($2::text IS NULL OR u.id != $2)
+         AND ($2::text[] IS NULL OR NOT (u.id = ANY($2::text[])))
          AND NOT EXISTS (
            SELECT 1 FROM bookings b
            WHERE b.maid_id = u.id
@@ -1547,7 +1549,7 @@ export const db = {
                 (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) DESC,
                 u.id
        LIMIT 10`,
-      [societyId, originalMaidId, date, startTime, endTime, dayOfWeek]
+      [societyId, excludeArray, date, startTime, endTime, dayOfWeek]
     );
 
     // Calculate pricing
