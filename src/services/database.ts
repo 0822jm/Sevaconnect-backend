@@ -366,13 +366,7 @@ export const db = {
                       / GREATEST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status NOT IN ('REQUESTED', 'TERMINATED')), 1)) * 30
               + LEAST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'COMPLETED')::float / 50.0, 1.0) * 10
           END
-        , 50)) as trust_score,
-        ARRAY(
-          SELECT ml.leave_date::text || ':' || ml.leave_type
-          FROM maid_leaves ml
-          WHERE ml.maid_id = u.id
-          ORDER BY ml.leave_date
-        ) AS leaves
+        , 50)) as trust_score
       FROM users u
       WHERE u.id = ${id}
     `;
@@ -444,8 +438,8 @@ export const db = {
 
     const id = generateId('u');
     const passwordHash = user.password ? await hashPassword(user.password) : '';
-    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password)
-       VALUES (${id}, ${user.name}, ${user.phone}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${user.phone}, ${user.address || null}, ${user.skills || []}, FALSE)`;
+    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, leaves, must_change_password)
+       VALUES (${id}, ${user.name}, ${user.phone}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${user.phone}, ${user.address || null}, ${user.skills || []}, ${[]}, FALSE)`;
     return id;
   },
 
@@ -462,45 +456,31 @@ export const db = {
   },
 
   toggleLeave: async (id: string, date: string): Promise<string[]> => {
-    const existing = await (sql as any)(
-      `SELECT id FROM maid_leaves WHERE maid_id = $1 AND leave_date = $2::date`,
-      [id, date]
-    );
-    if (existing.length > 0) {
-      await (sql as any)(`DELETE FROM maid_leaves WHERE maid_id = $1 AND leave_date = $2::date`, [id, date]);
-    } else {
-      await (sql as any)(
-        `INSERT INTO maid_leaves (id, maid_id, leave_date, leave_type) VALUES ($1, $2, $3::date, 'FULL')`,
-        [generateId('ml'), id, date]
-      );
-    }
-    const rows = await (sql as any)(
-      `SELECT leave_date::text, leave_type FROM maid_leaves WHERE maid_id = $1 ORDER BY leave_date`,
-      [id]
-    );
-    return rows.map((r: any) => `${r.leave_date}:${r.leave_type}`);
+    const rows = await sql`SELECT leaves FROM users WHERE id = ${id}`;
+    let leaves: string[] = rows[0]?.leaves || [];
+    leaves = leaves.includes(date)
+      ? leaves.filter((d: string) => d !== date)
+      : [...leaves, date];
+    await sql`UPDATE users SET leaves = ${leaves} WHERE id = ${id}`;
+    return leaves;
   },
 
-  // leaveType = null/undefined means clear the leave for that date
+  // New typed leave: stores "date:TYPE" format (e.g. "2025-01-15:MORNING")
+  // leaveType = null means clear any leave for that date
   setLeave: async (id: string, date: string, leaveType: string | null | undefined): Promise<string[]> => {
+    const rows = await sql`SELECT leaves FROM users WHERE id = ${id}`;
+    let leaves: string[] = rows[0]?.leaves || [];
+    // Remove any existing entry for this date (both "date" and "date:TYPE" formats)
+    leaves = leaves.filter((l: string) => {
+      const d = l.split(':')[0];
+      return d !== date;
+    });
+    // Add new entry if leaveType is specified
     if (leaveType) {
-      await (sql as any)(
-        `INSERT INTO maid_leaves (id, maid_id, leave_date, leave_type)
-         VALUES ($1, $2, $3::date, $4)
-         ON CONFLICT (maid_id, leave_date) DO UPDATE SET leave_type = EXCLUDED.leave_type`,
-        [generateId('ml'), id, date, leaveType]
-      );
-    } else {
-      await (sql as any)(
-        `DELETE FROM maid_leaves WHERE maid_id = $1 AND leave_date = $2::date`,
-        [id, date]
-      );
+      leaves.push(`${date}:${leaveType}`);
     }
-    const rows = await (sql as any)(
-      `SELECT leave_date::text, leave_type FROM maid_leaves WHERE maid_id = $1 ORDER BY leave_date`,
-      [id]
-    );
-    return rows.map((r: any) => `${r.leave_date}:${r.leave_type}`);
+    await sql`UPDATE users SET leaves = ${leaves} WHERE id = ${id}`;
+    return leaves;
   },
 
   getUsersBySociety: async (societyId: string): Promise<User[]> => {
@@ -520,13 +500,7 @@ export const db = {
                       / GREATEST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status NOT IN ('REQUESTED', 'TERMINATED')), 1)) * 30
               + LEAST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'COMPLETED')::float / 50.0, 1.0) * 10
           END
-        , 50)) as trust_score,
-        ARRAY(
-          SELECT ml.leave_date::text || ':' || ml.leave_type
-          FROM maid_leaves ml
-          WHERE ml.maid_id = u.id
-          ORDER BY ml.leave_date
-        ) AS leaves
+        , 50)) as trust_score
       FROM users u
       WHERE u.society_id = ${societyId} AND u.role != 'SOCIETY_ADMIN'
     `;
@@ -1571,13 +1545,12 @@ export const db = {
              )
          )
          AND NOT EXISTS (
-           SELECT 1 FROM maid_leaves ml
-           WHERE ml.maid_id = u.id
-             AND ml.leave_date = $3::date
+           SELECT 1 FROM unnest(u.leaves) AS lv
+           WHERE split_part(lv, ':', 1) = $3::text
              AND (
-               ml.leave_type = 'FULL'
-               OR (ml.leave_type = 'MORNING' AND $4 < '12:00')
-               OR (ml.leave_type = 'AFTERNOON' AND $5 > '12:00')
+               split_part(lv, ':', 2) IN ('FULL', '')
+               OR (split_part(lv, ':', 2) = 'MORNING' AND $4 < '12:00')
+               OR (split_part(lv, ':', 2) = 'AFTERNOON' AND $5 > '12:00')
              )
          )
        ORDER BY u.auto_accept DESC,
