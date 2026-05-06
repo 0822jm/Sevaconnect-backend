@@ -440,8 +440,8 @@ async function migrate() {
   ];
   for (const u of testUsers) {
     await (sql as any)(
-      `INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, leaves, must_change_password, auto_accept)
-       VALUES ($1, $2, $3, $4, $5, $6, TRUE, NULL, NULL, ARRAY[]::text[], ARRAY[]::text[], FALSE, $7)
+      `INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password, auto_accept)
+       VALUES ($1, $2, $3, $4, $5, $6, TRUE, NULL, NULL, ARRAY[]::text[], FALSE, $7)
        ON CONFLICT (id) DO NOTHING`,
       [u.id, u.name, u.username, pwHash, u.role, u.societyId, u.autoAccept]
     );
@@ -472,6 +472,53 @@ async function migrate() {
     []
   );
   console.log('✓ Backfilled NULL maid_id on pending-replacement rows');
+
+  // Step 27: Replace users.leaves TEXT[] column with a dedicated maid_leaves table
+  console.log('\n--- Step 27: maid_leaves table ---');
+
+  // 27a: Create the table
+  await sql(`
+    CREATE TABLE IF NOT EXISTS maid_leaves (
+      id         TEXT PRIMARY KEY,
+      maid_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      leave_date DATE NOT NULL,
+      leave_type TEXT NOT NULL DEFAULT 'FULL'
+                   CHECK (leave_type IN ('FULL', 'MORNING', 'AFTERNOON')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (maid_id, leave_date)
+    )
+  `, []);
+  await sql(`CREATE INDEX IF NOT EXISTS idx_maid_leaves_maid_date ON maid_leaves (maid_id, leave_date)`, []);
+  console.log('✓ Created maid_leaves table');
+
+  // 27b: Migrate existing leaves from users.leaves array (handles both "date" and "date:TYPE" formats)
+  const hasLeavesCol = await sql(
+    `SELECT COUNT(*) AS cnt FROM information_schema.columns
+     WHERE table_name = 'users' AND column_name = 'leaves' AND table_schema = 'public'`,
+    []
+  );
+  if (Number(hasLeavesCol[0].cnt) > 0) {
+    await sql(`
+      INSERT INTO maid_leaves (id, maid_id, leave_date, leave_type)
+      SELECT
+        'ml-' || md5(u.id || lv) AS id,
+        u.id AS maid_id,
+        split_part(lv, ':', 1)::date AS leave_date,
+        CASE WHEN split_part(lv, ':', 2) IN ('MORNING', 'AFTERNOON') THEN split_part(lv, ':', 2) ELSE 'FULL' END AS leave_type
+      FROM users u, unnest(u.leaves) AS lv
+      WHERE u.role = 'MAID'
+        AND u.leaves IS NOT NULL
+        AND array_length(u.leaves, 1) > 0
+      ON CONFLICT (maid_id, leave_date) DO NOTHING
+    `, []);
+    console.log('✓ Migrated existing leave data into maid_leaves');
+
+    // 27c: Drop users.leaves column
+    await sql(`ALTER TABLE users DROP COLUMN IF EXISTS leaves`, []);
+    console.log('✓ Dropped users.leaves column');
+  } else {
+    console.log('✓ users.leaves already dropped — skipping migration');
+  }
 
   console.log('\n=== Migration complete! ===');
 }
