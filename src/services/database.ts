@@ -444,8 +444,8 @@ export const db = {
 
     const id = generateId('u');
     const passwordHash = user.password ? await hashPassword(user.password) : '';
-    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, leaves, must_change_password)
-       VALUES (${id}, ${user.name}, ${user.phone}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${user.phone}, ${user.address || null}, ${user.skills || []}, ${[]}, FALSE)`;
+    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password)
+       VALUES (${id}, ${user.name}, ${user.phone}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${user.phone}, ${user.address || null}, ${user.skills || []}, FALSE)`;
     return id;
   },
 
