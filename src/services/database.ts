@@ -1544,7 +1544,15 @@ export const db = {
                 ))
              )
          )
-         AND NOT ($3::text = ANY(u.leaves))
+         AND NOT EXISTS (
+           SELECT 1 FROM unnest(u.leaves) AS lv
+           WHERE split_part(lv, ':', 1) = $3
+             AND (
+               split_part(lv, ':', 2) IN ('FULL', '')
+               OR (split_part(lv, ':', 2) = 'MORNING' AND $4 < '12:00')
+               OR (split_part(lv, ':', 2) = 'AFTERNOON' AND $5 > '12:00')
+             )
+         )
        ORDER BY u.auto_accept DESC,
                 (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) DESC,
                 u.id
