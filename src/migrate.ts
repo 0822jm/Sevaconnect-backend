@@ -54,9 +54,6 @@ async function migrate() {
     `, []);
     console.log('✓ Migrated leave data from users.leaves into maid_leaves');
 
-    // Step 4: Drop users.leaves column
-    await sql(`ALTER TABLE users DROP COLUMN IF EXISTS leaves`, []);
-    console.log('✓ Dropped users.leaves column');
   } else {
     console.log('✓ users.leaves already dropped — skipping migration');
   }
