@@ -1,0 +1,12 @@
+household_phone,maid_phone,service_name,frequency,start_time,start_date
+9123456789,9876543210,Basic Cleaning,DAILY,08:00,2026-04-07
+9123456789,9876543210,Cooking,"MON,WED,FRI",10:00,2026-04-07
+9004055323,9876543210,Deep cleaning,"TUE,THU",09:00,2026-04-08
+household_phone,maid_phone,job_description[optional],frequency,start_time,end_time,start_date,monthly_contract_fee
+9004055321,9876543210,Job description [optional],"TUE,THU",9:00,10:00,2026-04-08,Monthly contract fee
+9004055323,9876543210,Washing dishes,DAILY,14:00,2026-04-07
+
+
+9123456789,9876543210,Party setup,SAT,16:00,2026-04-11
+
+9123456789,9876543210,Party setup,SAT,16:00,2026-04-11

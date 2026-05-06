@@ -800,6 +800,7 @@ export const db = {
         SELECT DISTINCT ON (b.id) b.*
         FROM bookings b
         WHERE b.${fieldName} = $1
+          AND b.eff_end_date = '3499-12-31'
         ORDER BY b.id, b.eff_end_date DESC
       ) sub
       LEFT JOIN users m ON sub.maid_id = m.id
@@ -825,6 +826,7 @@ export const db = {
         FROM bookings b
         JOIN users h2 ON b.household_id = h2.id
         WHERE h2.society_id = $1
+          AND b.eff_end_date = '3499-12-31'
         ORDER BY b.id, b.eff_end_date DESC
       ) sub
       LEFT JOIN users m ON sub.maid_id = m.id
