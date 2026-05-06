@@ -1546,7 +1546,7 @@ export const db = {
          )
          AND NOT EXISTS (
            SELECT 1 FROM unnest(u.leaves) AS lv
-           WHERE split_part(lv, ':', 1) = $3
+           WHERE split_part(lv, ':', 1) = $3::text
              AND (
                split_part(lv, ':', 2) IN ('FULL', '')
                OR (split_part(lv, ':', 2) = 'MORNING' AND $4 < '12:00')
