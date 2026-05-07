@@ -977,17 +977,30 @@ export const db = {
     return rows.map(mapMessage);
   },
 
-  getMessageCounts: async (bookingIds: string[]): Promise<Record<string, number>> => {
+  getMessageCounts: async (bookingIds: string[], userId: string): Promise<Record<string, number>> => {
     if (bookingIds.length === 0) return {};
-    const placeholders = bookingIds.map((_: string, i: number) => `$${i + 1}`).join(',');
+    const placeholders = bookingIds.map((_: string, i: number) => `$${i + 2}`).join(',');
     const rows = await (sql as any)(
-      `SELECT booking_id, COUNT(*)::int as count FROM messages WHERE booking_id IN (${placeholders}) GROUP BY booking_id`,
-      bookingIds
+      `SELECT booking_id, COUNT(*)::int AS unread
+       FROM messages
+       WHERE booking_id IN (${placeholders})
+         AND sender_id != $1
+         AND NOT is_read
+       GROUP BY booking_id`,
+      [userId, ...bookingIds]
     );
     const result: Record<string, number> = {};
     for (const id of bookingIds) result[id] = 0;
-    for (const row of rows) result[row.booking_id] = Number(row.count);
+    for (const row of rows) result[row.booking_id] = Number(row.unread);
     return result;
+  },
+
+  markMessagesRead: async (bookingId: string, userId: string): Promise<void> => {
+    await (sql as any)(
+      `UPDATE messages SET is_read = TRUE
+       WHERE booking_id = $1 AND sender_id != $2 AND NOT is_read`,
+      [bookingId, userId]
+    );
   },
 
   sendMessage: async (message: { bookingId: string; senderId: string; senderName: string; text: string }): Promise<ChatMessage> => {

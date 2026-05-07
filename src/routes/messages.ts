@@ -11,8 +11,18 @@ router.get('/counts', async (req: Request, res: Response) => {
   try {
     const ids = ((req.query.bookingIds as string) || '').split(',').filter(Boolean);
     if (!ids.length) { res.json({}); return; }
-    const counts = await db.getMessageCounts(ids);
+    const counts = await db.getMessageCounts(ids, req.user!.userId);
     res.json(counts);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/messages/:bookingId/read  — marks all unread messages as read for the authenticated user
+router.put('/:bookingId/read', async (req: Request, res: Response) => {
+  try {
+    await db.markMessagesRead(req.params.bookingId, req.user!.userId);
+    res.json({ ok: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
