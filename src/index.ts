@@ -37,6 +37,6 @@ app.use('/api/messages', messageRoutes);
 app.use('/api/reviews', reviewRoutes);
 
 app.listen(PORT, () => {
-  console.log(`[SevaConnect Backend] Running on http://localhost:${PORT}`);
-  console.log(`[SevaConnect Backend] Health check: http://localhost:${PORT}/api/health`);
+  console.log(`[Kamon Backend] Running on http://localhost:${PORT}`);
+  console.log(`[Kamon Backend] Health check: http://localhost:${PORT}/api/health`);
 });

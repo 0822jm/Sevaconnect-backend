@@ -1,7 +1,7 @@
 {
-  "name": "sevaconnect-backend",
+  "name": "kamon-backend",
   "version": "1.0.0",
-  "description": "SevaConnect API backend",
+  "description": "Kamon API backend",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",

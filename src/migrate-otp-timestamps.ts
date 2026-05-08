@@ -6,7 +6,7 @@ import { neon } from '@neondatabase/serverless';
 const sql: any = neon(process.env.DATABASE_URL!);
 
 async function migrate() {
-  console.log('=== SevaConnect DB Migration: bookings OTP timestamps ===\n');
+  console.log('=== Kamon DB Migration: bookings OTP timestamps ===\n');
 
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS start_otp_time TIMESTAMPTZ`, []);
   await sql(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS end_otp_time TIMESTAMPTZ`, []);

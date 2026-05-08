@@ -18,7 +18,7 @@ export async function sendPushNotification(
         title,
         body,
         sound: 'default',
-        channelId: 'sevaconnect',
+        channelId: 'kamon',
         priority: 'high',
       }),
     });

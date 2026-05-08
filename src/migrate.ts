@@ -10,7 +10,7 @@ import { neon } from '@neondatabase/serverless';
 const sql: any = neon(process.env.DATABASE_URL!);
 
 async function migrate() {
-  console.log('=== SevaConnect DB Migration: maid_leaves ===\n');
+  console.log('=== Kamon DB Migration: maid_leaves ===\n');
 
   // Step 1: Create maid_leaves table (idempotent)
   await sql(`
