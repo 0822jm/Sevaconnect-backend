@@ -120,6 +120,8 @@ export interface Booking {
   status: BookingStatus;
   startOtp?: string;
   endOtp?: string;
+  startOtpTime?: string | null;
+  endOtpTime?: string | null;
   maidRequestedStart?: boolean;
   maidRequestedEnd?: boolean;
   isRecurring: boolean;
