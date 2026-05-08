@@ -281,6 +281,8 @@ const mapBooking = (row: any): Booking => ({
   status: row.status,
   startOtp: row.start_otp,
   endOtp: row.end_otp,
+  startOtpTime: row.start_otp_time ? new Date(row.start_otp_time).toISOString() : null,
+  endOtpTime: row.end_otp_time ? new Date(row.end_otp_time).toISOString() : null,
   maidRequestedStart: row.maid_requested_start,
   maidRequestedEnd: row.maid_requested_end,
   isRecurring: row.is_recurring,
@@ -951,6 +953,14 @@ export const db = {
     if (rows.length === 0) return false;
     const storedOtp = type === 'start' ? rows[0].start_otp : rows[0].end_otp;
     return storedOtp === code;
+  },
+
+  stampOtpTime: async (id: string, type: 'start' | 'end'): Promise<void> => {
+    if (type === 'start') {
+      await (sql as any)(`UPDATE bookings SET start_otp_time = NOW() WHERE id = $1 AND eff_end_date = '3499-12-31'`, [id]);
+    } else {
+      await (sql as any)(`UPDATE bookings SET end_otp_time = NOW() WHERE id = $1 AND eff_end_date = '3499-12-31'`, [id]);
+    }
   },
 
   regenerateOtp: async (id: string, type: 'start' | 'end'): Promise<string> => {

@@ -561,7 +561,10 @@ router.post('/:id/verify-otp', async (req: Request, res: Response) => {
 
     if (isValid) {
       const nextStatus = type === 'start' ? BookingStatus.IN_PROGRESS : BookingStatus.COMPLETED;
-      await db.updateBookingStatus(req.params.id, nextStatus);
+      await Promise.all([
+        db.stampOtpTime(req.params.id, type),
+        db.updateBookingStatus(req.params.id, nextStatus),
+      ]);
       res.json({ success: true, status: nextStatus });
     } else {
       res.status(400).json({ error: 'The code you entered is incorrect.' });
