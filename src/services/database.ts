@@ -110,7 +110,8 @@ export interface Booking {
   id: string;
   bookingType: BookingType;
   isReplacementOf?: string;
-  societyServiceId: string;
+  societyServiceId: string | null;
+  societyServiceIds?: string[];
   householdId: string;
   maidId: string;
   workStartDate: string;
@@ -133,6 +134,8 @@ export interface Booking {
   priceAtBooking?: number;
   serviceName?: LocalizedString;
   serviceIcon?: string;
+  serviceNames?: string;
+  serviceCount?: number;
   maidName?: string;
   householdName?: string;
   householdAddress?: string;
@@ -296,6 +299,8 @@ const mapBooking = (row: any): Booking => ({
   priceAtBooking: row.price_at_booking ? Number(row.price_at_booking) : undefined,
   serviceName: row.service_name ? parseLocalized(row.service_name) : undefined,
   serviceIcon: row.service_icon || undefined,
+  serviceNames: row.service_names || undefined,
+  serviceCount: row.service_count != null ? Number(row.service_count) : undefined,
   maidName: row.maid_name,
   householdName: row.household_name,
   householdAddress: row.household_address,
@@ -824,7 +829,9 @@ export const db = {
         h.address as household_address,
         h.phone as household_phone,
         COALESCE(ss.name, svc.name) as service_name,
-        COALESCE(ss.icon, svc.icon) as service_icon
+        COALESCE(svc_agg.svc_icon, COALESCE(ss.icon, svc.icon)) as service_icon,
+        svc_agg.service_names,
+        svc_agg.service_count
       FROM (
         SELECT DISTINCT ON (b.id) b.*
         FROM bookings b
@@ -836,6 +843,16 @@ export const db = {
       JOIN users h ON sub.household_id = h.id
       LEFT JOIN society_services ss ON sub.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
+      LEFT JOIN LATERAL (
+        SELECT
+          string_agg(COALESCE(ss2.name->>'en', svc2.name->>'en'), ', ' ORDER BY bs.sort_order) AS service_names,
+          (array_agg(COALESCE(ss2.icon, svc2.icon) ORDER BY bs.sort_order))[1] AS svc_icon,
+          COUNT(*)::int AS service_count
+        FROM booking_services bs
+        LEFT JOIN society_services ss2 ON bs.society_service_id = ss2.id
+        LEFT JOIN services svc2 ON ss2.service_id = svc2.id
+        WHERE bs.booking_id = sub.id
+      ) svc_agg ON true
       ORDER BY sub.work_start_date DESC, sub.start_time DESC`,
       [userId]
     );
@@ -849,7 +866,9 @@ export const db = {
         h.name as household_name,
         h.address as household_address,
         COALESCE(ss.name, svc.name) as service_name,
-        COALESCE(ss.icon, svc.icon) as service_icon
+        COALESCE(svc_agg.svc_icon, COALESCE(ss.icon, svc.icon)) as service_icon,
+        svc_agg.service_names,
+        svc_agg.service_count
       FROM (
         SELECT DISTINCT ON (b.id) b.*
         FROM bookings b
@@ -862,6 +881,16 @@ export const db = {
       JOIN users h ON sub.household_id = h.id
       LEFT JOIN society_services ss ON sub.society_service_id = ss.id
       LEFT JOIN services svc ON ss.service_id = svc.id
+      LEFT JOIN LATERAL (
+        SELECT
+          string_agg(COALESCE(ss2.name->>'en', svc2.name->>'en'), ', ' ORDER BY bs.sort_order) AS service_names,
+          (array_agg(COALESCE(ss2.icon, svc2.icon) ORDER BY bs.sort_order))[1] AS svc_icon,
+          COUNT(*)::int AS service_count
+        FROM booking_services bs
+        LEFT JOIN society_services ss2 ON bs.society_service_id = ss2.id
+        LEFT JOIN services svc2 ON ss2.service_id = svc2.id
+        WHERE bs.booking_id = sub.id
+      ) svc_agg ON true
       ORDER BY sub.work_start_date DESC, sub.start_time DESC`,
       [societyId]
     );
@@ -872,6 +901,14 @@ export const db = {
     const id = booking.id || generateId('bk');
     const bookingType: BookingType = booking.bookingType || 'ADHOC';
     const initialStatus = bookingType === 'CONTRACT' ? BookingStatus.CONFIRMED : BookingStatus.REQUESTED;
+
+    // Multi-service: societyServiceIds array — set society_service_id = NULL on the booking row
+    const societyServiceIds: string[] | null =
+      booking.societyServiceIds && booking.societyServiceIds.length > 0
+        ? booking.societyServiceIds
+        : null;
+    const legacySsId = societyServiceIds ? null : (booking.societyServiceId || null);
+
     await (sql as any)(
       `INSERT INTO bookings (
         id, booking_type, is_replacement_of, society_service_id, household_id, maid_id,
@@ -888,7 +925,7 @@ export const db = {
       )`,
       [
         id, bookingType, booking.isReplacementOf || null,
-        booking.societyServiceId, booking.householdId, booking.maidId,
+        legacySsId, booking.householdId, booking.maidId,
         booking.workStartDate, booking.workEndDate, booking.startTime, booking.endTime,
         booking.status || initialStatus,
         booking.isRecurring || false, booking.frequency || null, booking.customFrequencyDays || null,
@@ -896,6 +933,30 @@ export const db = {
         booking.stagingContractId || null, booking.autoAccepted || false, booking.updateComments || null,
       ]
     );
+
+    // Write booking_services rows for new bookings (both single and multi-service)
+    const ssIdsToInsert = societyServiceIds || (legacySsId ? [legacySsId] : []);
+    if (ssIdsToInsert.length > 0) {
+      for (let i = 0; i < ssIdsToInsert.length; i++) {
+        const ssId = ssIdsToInsert[i];
+        const ssRows = await (sql as any)(
+          `SELECT COALESCE(ss.price, s.base_price) as price,
+                  COALESCE(ss.duration, s.duration_minutes) as duration
+           FROM society_services ss
+           LEFT JOIN services s ON ss.service_id = s.id
+           WHERE ss.id = $1`,
+          [ssId]
+        );
+        const price = ssRows[0]?.price != null ? Number(ssRows[0].price) : (booking.priceAtBooking || 0);
+        const duration = ssRows[0]?.duration != null ? Number(ssRows[0].duration) : 0;
+        await (sql as any)(
+          `INSERT INTO booking_services (id, booking_id, society_service_id, price_at_booking, duration_minutes, sort_order)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (id) DO NOTHING`,
+          [generateId('bks'), id, ssId, price, duration, i]
+        );
+      }
+    }
 
     // Auto-accept: if the maid has opted in, immediately confirm non-contract ADHOC bookings
     if (bookingType === 'ADHOC' && (!booking.status || booking.status === BookingStatus.REQUESTED)) {
@@ -1408,6 +1469,18 @@ export const db = {
         `Replacement maid assigned for adhoc booking`,
       ]
     );
+
+    // Copy booking_services rows from original to replacement (multi-service bookings)
+    await (sql as any)(
+      `INSERT INTO booking_services (id, booking_id, society_service_id, price_at_booking, duration_minutes, sort_order)
+       SELECT 'bks-' || md5($2 || bs.society_service_id || bs.sort_order::text),
+              $2, bs.society_service_id, bs.price_at_booking, bs.duration_minutes, bs.sort_order
+       FROM booking_services bs
+       WHERE bs.booking_id = $1
+       ON CONFLICT (id) DO NOTHING`,
+      [bookingId, newId]
+    );
+
     return { newBookingId: newId, bookingType: 'ADHOC' };
   },
 
@@ -1551,7 +1624,20 @@ export const db = {
     const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
     const dayOfWeek = dayNames[dateObj.getDay()];
 
-    // Find available maids
+    // Build required skills from the booking's services
+    const serviceRows = await (sql as any)(
+      `SELECT COALESCE(ss.name->>'en', svc.name->>'en') as name_en
+       FROM booking_services bs
+       LEFT JOIN society_services ss ON bs.society_service_id = ss.id
+       LEFT JOIN services svc ON ss.service_id = svc.id
+       WHERE bs.booking_id = $1`,
+      [bookingId]
+    );
+    const requiredSkills: string[] = serviceRows
+      .map((r: any) => (r.name_en || '').toLowerCase().trim())
+      .filter(Boolean);
+
+    // Find available maids with time availability and required skills
     const maids = await (sql as any)(
       `SELECT u.id, u.name, u.auto_accept,
               COALESCE((SELECT AVG(rating) FROM reviews WHERE maid_id = u.id), 0) as avg_rating,
@@ -1571,6 +1657,16 @@ export const db = {
          AND u.role = 'MAID'
          AND u.is_verified = true
          AND ($2::text[] IS NULL OR NOT (u.id = ANY($2::text[])))
+         AND (
+           $7::text[] IS NULL OR array_length($7::text[], 1) = 0
+           OR (
+             SELECT COUNT(*) FROM unnest($7::text[]) req_skill
+             WHERE EXISTS (
+               SELECT 1 FROM unnest(u.skills) maid_skill
+               WHERE lower(trim(maid_skill)) = req_skill
+             )
+           ) = array_length($7::text[], 1)
+         )
          AND NOT EXISTS (
            SELECT 1 FROM bookings b
            WHERE b.maid_id = u.id
@@ -1608,7 +1704,7 @@ export const db = {
                 (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) DESC,
                 u.id
        LIMIT 10`,
-      [societyId, excludeArray, date, startTime, endTime, dayOfWeek]
+      [societyId, excludeArray, date, startTime, endTime, dayOfWeek, requiredSkills.length > 0 ? requiredSkills : null]
     );
 
     // Calculate pricing
