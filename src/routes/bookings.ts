@@ -239,6 +239,17 @@ router.get('/replacements', async (req: Request, res: Response) => {
 router.post('/', async (req: Request, res: Response) => {
   try {
     const booking = await db.createBooking(req.body);
+    // Notify maid when booking requires their manual acceptance
+    if (booking.status === BookingStatus.REQUESTED && req.body.maidId) {
+      const maidToken = await db.getUserPushToken(req.body.maidId);
+      if (maidToken) {
+        sendPushNotification(
+          maidToken,
+          'New Booking Request',
+          `You have a new booking request for ${booking.workStartDate} at ${booking.startTime}. Tap to review.`
+        );
+      }
+    }
     res.status(201).json(booking);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -497,6 +508,19 @@ router.put('/:id/status', async (req: Request, res: Response) => {
 
     // All other status changes — in-place update
     await db.updateBookingStatus(req.params.id, status as BookingStatus);
+
+    // Notify household when maid accepts an ADHOC booking
+    if (status === BookingStatus.CONFIRMED && booking.bookingType === 'ADHOC') {
+      const info = await db.getNotificationInfoForBooking(req.params.id);
+      if (info?.householdPushToken) {
+        sendPushNotification(
+          info.householdPushToken,
+          'Booking Confirmed',
+          `${info.maidName} has accepted your ${info.serviceName} booking. See you on ${booking.workStartDate}!`
+        );
+      }
+    }
+
     res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });

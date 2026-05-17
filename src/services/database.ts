@@ -1282,6 +1282,14 @@ export const db = {
     );
   },
 
+  getUserPushToken: async (userId: string): Promise<string | null> => {
+    const rows = await (sql as any)(
+      `SELECT expo_push_token FROM users WHERE id = $1`,
+      [userId]
+    );
+    return rows[0]?.expo_push_token ?? null;
+  },
+
   // Get maid push token + household name for a staging contract (used for push notifications)
   getMaidInfoForContract: async (stagingContractId: string): Promise<{ maidPushToken: string | null; householdName: string } | null> => {
     const rows = await (sql as any)(
@@ -1659,6 +1667,7 @@ export const db = {
          AND ($2::text[] IS NULL OR NOT (u.id = ANY($2::text[])))
          AND (
            $7::text[] IS NULL OR array_length($7::text[], 1) = 0
+           OR u.skills IS NULL OR array_length(u.skills, 1) = 0
            OR (
              SELECT COUNT(*) FROM unnest($7::text[]) req_skill
              WHERE EXISTS (
