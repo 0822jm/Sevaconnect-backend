@@ -1620,8 +1620,10 @@ export const db = {
     const endTime = booking.endTime;
 
     // Get the society for this household
+    console.log(`[replacementMaids] bookingId=${bookingId} householdId=${booking.householdId} societyServiceId=${booking.societyServiceId} date=${date} start=${startTime} end=${endTime}`);
     const householdRows = await (sql as any)(`SELECT society_id FROM users WHERE id = $1`, [booking.householdId]);
     let societyId: string | undefined = householdRows[0]?.society_id;
+    console.log(`[replacementMaids] societyId from household lookup: ${societyId}`);
 
     // Fallback: resolve society from booking_services → society_services
     if (!societyId) {
@@ -1632,6 +1634,7 @@ export const db = {
         [bookingId]
       );
       societyId = ssRows[0]?.society_id;
+      console.log(`[replacementMaids] societyId from booking_services fallback: ${societyId}`);
     }
 
     // Final fallback: direct societyServiceId on the booking (legacy single-service)
@@ -1641,6 +1644,7 @@ export const db = {
         [booking.societyServiceId]
       );
       societyId = ssRows[0]?.society_id;
+      console.log(`[replacementMaids] societyId from societyServiceId fallback: ${societyId}`);
     }
 
     if (!societyId) {
@@ -1676,6 +1680,12 @@ export const db = {
     const requiredSkills: string[] = serviceRows
       .map((r: any) => (r.name_en || '').toLowerCase().trim())
       .filter(Boolean);
+
+    console.log(`[replacementMaids] societyId=${societyId} excludeArray=${JSON.stringify(excludeArray)} date=${date} start=${startTime} end=${endTime} dayOfWeek=${dayOfWeek} requiredSkills=${JSON.stringify(requiredSkills)}`);
+
+    // Check raw maid count in society (without availability filter)
+    const rawMaids = await (sql as any)(`SELECT id, name, is_verified FROM users WHERE society_id = $1 AND role = 'MAID'`, [societyId]);
+    console.log(`[replacementMaids] raw MAID count in society: ${rawMaids.length} rows:`, rawMaids.map((r: any) => `${r.name}(verified=${r.is_verified})`).join(', '));
 
     // Find available maids with time availability and required skills
     const maids = await (sql as any)(
@@ -1747,6 +1757,7 @@ export const db = {
        LIMIT 10`,
       [societyId, excludeArray, date, startTime, endTime, dayOfWeek, requiredSkills.length > 0 ? requiredSkills : null]
     );
+    console.log(`[replacementMaids] final maid count after all filters: ${maids.length}`);
 
     // Calculate pricing
     let hourlyRate = 150;
