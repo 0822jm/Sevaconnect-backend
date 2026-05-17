@@ -984,11 +984,18 @@ export const db = {
     await (sql as any)(query, params);
   },
 
-  updateBookingStatus: async (id: string, status: BookingStatus): Promise<void> => {
-    await (sql as any)(
-      `UPDATE bookings SET status = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`,
-      [status, id]
-    );
+  updateBookingStatus: async (id: string, status: BookingStatus, cancelledBy?: string): Promise<void> => {
+    if (cancelledBy) {
+      await (sql as any)(
+        `UPDATE bookings SET status = $1, update_comments = $2 WHERE id = $3 AND eff_end_date = '3499-12-31'`,
+        [status, cancelledBy, id]
+      );
+    } else {
+      await (sql as any)(
+        `UPDATE bookings SET status = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`,
+        [status, id]
+      );
+    }
   },
 
   getHouseholdPhoneForBooking: async (bookingId: string): Promise<string> => {
@@ -1614,7 +1621,32 @@ export const db = {
 
     // Get the society for this household
     const householdRows = await (sql as any)(`SELECT society_id FROM users WHERE id = $1`, [booking.householdId]);
-    const societyId = householdRows[0]?.society_id;
+    let societyId: string | undefined = householdRows[0]?.society_id;
+
+    // Fallback: resolve society from booking_services → society_services
+    if (!societyId) {
+      const ssRows = await (sql as any)(
+        `SELECT ss.society_id FROM booking_services bs
+         JOIN society_services ss ON bs.society_service_id = ss.id
+         WHERE bs.booking_id = $1 LIMIT 1`,
+        [bookingId]
+      );
+      societyId = ssRows[0]?.society_id;
+    }
+
+    // Final fallback: direct societyServiceId on the booking (legacy single-service)
+    if (!societyId && booking.societyServiceId) {
+      const ssRows = await (sql as any)(
+        `SELECT society_id FROM society_services WHERE id = $1`,
+        [booking.societyServiceId]
+      );
+      societyId = ssRows[0]?.society_id;
+    }
+
+    if (!societyId) {
+      console.error(`getAvailableReplacementMaids: could not resolve societyId for booking ${bookingId}`);
+      return { maids: [], hourlyRate: 150, durationHours: 1, isContractReplacement: false };
+    }
 
     // Build exclusion list: the maid on this booking (canceller if REPLACEMENT/ADHOC)
     // plus the original contract maid (via is_replacement_of). Both must be excluded so

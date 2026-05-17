@@ -476,19 +476,22 @@ router.put('/:id/status', async (req: Request, res: Response) => {
         return;
       }
       // Adhoc or Replacement cancellation — status in-place, record stays open
-      await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED);
+      const cancelledBy = (req.body.cancelledBy as string) || 'MAID';
+      await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED, cancelledBy);
 
-      // Notify household
-      const info = await db.getNotificationInfoForBooking(req.params.id);
-      if (info?.householdPushToken) {
-        const dateLabel = new Date(booking.workStartDate + 'T00:00').toLocaleDateString('en-IN', {
-          weekday: 'short', day: 'numeric', month: 'short',
-        });
-        sendPushNotification(
-          info.householdPushToken,
-          'Booking Cancelled – Replacement Needed',
-          `${info.maidName} cancelled ${info.serviceName} on ${dateLabel}. Please arrange a replacement helper.`,
-        );
+      // Only notify household when the maid cancelled (not when household self-cancels)
+      if (cancelledBy !== 'HOUSEHOLD') {
+        const info = await db.getNotificationInfoForBooking(req.params.id);
+        if (info?.householdPushToken) {
+          const dateLabel = new Date(booking.workStartDate + 'T00:00').toLocaleDateString('en-IN', {
+            weekday: 'short', day: 'numeric', month: 'short',
+          });
+          sendPushNotification(
+            info.householdPushToken,
+            'Booking Cancelled – Replacement Needed',
+            `${info.maidName} cancelled ${info.serviceName} on ${dateLabel}. Please arrange a replacement helper.`,
+          );
+        }
       }
       res.json({ success: true });
       return;
