@@ -79,6 +79,18 @@ export interface User {
   trustScore?: number;
 }
 
+export interface PricingConfigField {
+  key: string;
+  label: string;
+  pricePerUnit: number;
+  max?: number;
+}
+
+export interface PricingConfig {
+  basePrice: number;
+  fields: PricingConfigField[];
+}
+
 export interface Service {
   id: string;
   name: LocalizedString;
@@ -88,6 +100,7 @@ export interface Service {
   icon: string;
   isGeneric: boolean;
   isActive: boolean;
+  pricingConfig?: PricingConfig;
 }
 
 export interface SocietyService {
@@ -104,6 +117,7 @@ export interface SocietyService {
   isGeneric: boolean;
   isActive: boolean;
   isExclusive: boolean;    // true when serviceId is null
+  pricingConfig?: PricingConfig;
 }
 
 export interface Booking {
@@ -254,6 +268,7 @@ const mapService = (row: any): Service => ({
   icon: row.icon,
   isGeneric: row.is_generic || false,
   isActive: row.is_active ?? true,
+  pricingConfig: row.pricing_config ?? undefined,
 });
 
 const mapSocietyService = (row: any): SocietyService => ({
@@ -270,6 +285,7 @@ const mapSocietyService = (row: any): SocietyService => ({
   isGeneric: row.is_generic || false,
   isActive: row.is_active ?? true,
   isExclusive: !row.service_id,
+  pricingConfig: row.pricing_config ?? undefined,
 });
 
 const mapBooking = (row: any): Booking => ({
@@ -688,10 +704,11 @@ export const db = {
     const id = generateId('srv');
     const name = typeof service.name === 'string' ? { en: service.name } : (service.name || { en: '' });
     const description = typeof service.description === 'string' ? { en: service.description } : (service.description || { en: '' });
+    const pricingConfig = service.pricingConfig ? JSON.stringify(service.pricingConfig) : null;
     await (sql as any)(
-      `INSERT INTO services (id, name, description, base_price, duration_minutes, icon, is_generic, is_active)
-       VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7, true)`,
-      [id, JSON.stringify(name), JSON.stringify(description), service.basePrice, service.durationMinutes, service.icon, service.isGeneric || false]
+      `INSERT INTO services (id, name, description, base_price, duration_minutes, icon, is_generic, is_active, pricing_config)
+       VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7, true, $8::jsonb)`,
+      [id, JSON.stringify(name), JSON.stringify(description), service.basePrice, service.durationMinutes, service.icon, service.isGeneric || false, pricingConfig]
     );
     return (await db.getServiceById(id))!;
   },
@@ -700,19 +717,22 @@ export const db = {
     const colMap: Record<string, string> = {
       name: 'name', description: 'description', basePrice: 'base_price',
       durationMinutes: 'duration_minutes', icon: 'icon', isGeneric: 'is_generic', isActive: 'is_active',
+      pricingConfig: 'pricing_config',
     };
     const entries = Object.entries(updates).filter(([key, v]) => v !== undefined && colMap[key]);
     if (entries.length > 0) {
-      const jsonbCols = new Set(['name', 'description']);
+      const jsonbCols = new Set(['name', 'description', 'pricingConfig']);
       const fields = entries.map(([key, _], i) => {
         const col = colMap[key];
         return jsonbCols.has(key) ? `${col} = $${i + 2}::jsonb` : `${col} = $${i + 2}`;
       }).join(', ');
-      const values = entries.map(([key, v]) =>
-        (key === 'name' || key === 'description')
-          ? JSON.stringify(typeof v === 'string' ? { en: v } : v)
-          : v
-      );
+      const values = entries.map(([key, v]) => {
+        if (key === 'name' || key === 'description')
+          return JSON.stringify(typeof v === 'string' ? { en: v } : v);
+        if (key === 'pricingConfig')
+          return v === null ? null : JSON.stringify(v);
+        return v;
+      });
       await (sql as any)(`UPDATE services SET ${fields} WHERE id = $1`, [id, ...values]);
     }
     return (await db.getServiceById(id))!;
@@ -735,7 +755,8 @@ export const db = {
         COALESCE(ss.duration, s.duration_minutes) AS duration_minutes,
         COALESCE(ss.icon, s.icon)              AS icon,
         COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
-        ss.is_active
+        ss.is_active,
+        s.pricing_config
        FROM society_services ss
        LEFT JOIN services s ON ss.service_id = s.id
        WHERE ss.society_id = $1
@@ -757,7 +778,8 @@ export const db = {
         COALESCE(ss.duration, s.duration_minutes) AS duration_minutes,
         COALESCE(ss.icon, s.icon)              AS icon,
         COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
-        ss.is_active
+        ss.is_active,
+        s.pricing_config
        FROM society_services ss
        LEFT JOIN services s ON ss.service_id = s.id
        WHERE ss.id = $1`,
@@ -949,11 +971,12 @@ export const db = {
         );
         const price = ssRows[0]?.price != null ? Number(ssRows[0].price) : (booking.priceAtBooking || 0);
         const duration = ssRows[0]?.duration != null ? Number(ssRows[0].duration) : 0;
+        const inputs = booking.bookingInputs?.[ssId] ?? null;
         await (sql as any)(
-          `INSERT INTO booking_services (id, booking_id, society_service_id, price_at_booking, duration_minutes, sort_order)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO booking_services (id, booking_id, society_service_id, price_at_booking, duration_minutes, sort_order, booking_inputs)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
            ON CONFLICT (id) DO NOTHING`,
-          [generateId('bks'), id, ssId, price, duration, i]
+          [generateId('bks'), id, ssId, price, duration, i, inputs ? JSON.stringify(inputs) : null]
         );
       }
     }
