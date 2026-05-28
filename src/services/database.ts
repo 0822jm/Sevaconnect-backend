@@ -651,14 +651,40 @@ export const db = {
     return rows;
   },
 
-  createSociety: async (society: { name: string; address: string; code: string; phone: string; initialPassword?: string }) => {
+  createSociety: async (society: {
+    name: string;
+    address: string;
+    code: string;
+    phone: string;
+    adminName?: string;
+    adminUsername?: string;
+    initialPassword?: string;
+  }) => {
     const socId = generateId('soc');
     const adminId = generateId('u');
     const initialPassword = society.initialPassword || Math.random().toString(36).slice(-8);
     const passwordHash = await hashPassword(initialPassword);
 
-    const existingUser = await sql`SELECT id FROM users WHERE phone = ${society.phone} OR username = ${society.phone}`;
+    // Resolve the admin's display name and login username. Both are now
+    // explicit fields collected at onboarding. Fall back to legacy auto-values
+    // for older callers that don't send them.
+    const adminName = (society.adminName && society.adminName.trim()) || `${society.name} Admin`;
+    const adminUsername = (society.adminUsername && society.adminUsername.trim()) || society.phone;
+
+    // Conflict check: an existing user with this phone, OR with this username,
+    // OR a user whose username/phone equals our chosen phone or username.
+    const existingUser = await sql`
+      SELECT id, phone, username FROM users
+      WHERE phone = ${society.phone}
+         OR username = ${society.phone}
+         OR phone = ${adminUsername}
+         OR username = ${adminUsername}
+    `;
     if (existingUser.length > 0) {
+      const conflictsOnUsername = existingUser.some((r: any) => r.username === adminUsername || r.phone === adminUsername);
+      if (conflictsOnUsername && adminUsername !== society.phone) {
+        throw new Error('Admin username is already taken.');
+      }
       throw new Error('Admin phone number is already registered to another account.');
     }
 
@@ -668,7 +694,7 @@ export const db = {
     }
 
     await sql`INSERT INTO users (id, name, username, password_hash, role, is_verified, phone, must_change_password)
-       VALUES (${adminId}, ${society.name + ' Admin'}, ${society.phone}, ${passwordHash}, ${UserRole.SOCIETY_ADMIN}, TRUE, ${society.phone}, TRUE)`;
+       VALUES (${adminId}, ${adminName}, ${adminUsername}, ${passwordHash}, ${UserRole.SOCIETY_ADMIN}, TRUE, ${society.phone}, TRUE)`;
 
     try {
       await sql`INSERT INTO societies (id, name, address, code) VALUES (${socId}, ${society.name}, ${society.address}, ${society.code})`;
@@ -678,7 +704,7 @@ export const db = {
       throw error;
     }
 
-    return { socId, adminId, initialPassword };
+    return { socId, adminId, initialPassword, adminUsername };
   },
 
   resetSocietyAdminPin: async (societyId: string): Promise<{ pin: string; phone: string }> => {
