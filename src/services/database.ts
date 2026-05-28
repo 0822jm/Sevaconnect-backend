@@ -480,15 +480,33 @@ export const db = {
   },
 
   registerUser: async (user: any): Promise<string> => {
-    const existing = await sql`SELECT id FROM users WHERE phone = ${user.phone} OR username = ${user.phone}`;
+    if (!user.username || typeof user.username !== 'string' || !user.username.trim()) {
+      throw new Error('Username is required.');
+    }
+    const username = user.username.trim();
+
+    // Conflict check: phone collides with anyone's phone or username, AND the
+    // chosen username collides with anyone's username or phone. This prevents
+    // shadowing existing phones too (since login matches username OR phone).
+    const existing = await sql`
+      SELECT id, phone, username FROM users
+      WHERE phone = ${user.phone}
+         OR username = ${user.phone}
+         OR phone = ${username}
+         OR username = ${username}
+    `;
     if (existing.length > 0) {
+      const usernameConflict = existing.some((r: any) => r.username === username || r.phone === username);
+      if (usernameConflict && username !== user.phone) {
+        throw new Error('This username is already taken.');
+      }
       throw new Error('This phone number is already registered to an account.');
     }
 
     const id = generateId('u');
     const passwordHash = user.password ? await hashPassword(user.password) : '';
     await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password)
-       VALUES (${id}, ${user.name}, ${user.phone}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${user.phone}, ${user.address || null}, ${user.skills || []}, FALSE)`;
+       VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${user.phone}, ${user.address || null}, ${user.skills || []}, FALSE)`;
     return id;
   },
 
