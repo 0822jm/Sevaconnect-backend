@@ -38,10 +38,13 @@ async function migrate() {
     // ─── 2. Seed values for the three system services ───
     console.log('\nStep 2: Seed visibility for system services');
 
-    // Contract Replacement — hidden everywhere, auto-provisioned at society onboarding.
+    // Contract Replacement — hidden from households (system uses it for
+    // auto-priced replacement bookings); visible to society admins so they
+    // can adjust price/deactivate; hidden from maid skills; auto-provisioned
+    // at onboarding so every society has it ready when a maid cancels.
     const repl = await client.query(`
       UPDATE services SET
-        hidden_from_society_admin = TRUE,
+        hidden_from_society_admin = FALSE,
         hidden_from_household     = TRUE,
         hidden_from_maid_skills   = TRUE,
         is_auto_provisioned       = TRUE
@@ -64,12 +67,13 @@ async function migrate() {
     `);
     console.log(`  ✓ srv-contract-global:    ${contract.rowCount === 1 ? 'updated' : 'NOT FOUND'}`);
 
-    // General Help — hidden from society admin + maid skills; visible to households
-    // (generic booking flow). Auto-provisioned silently at onboarding.
+    // General Help — hidden from everyone now. Still auto-provisioned so the
+    // row exists if any legacy code path or existing booking references it,
+    // but no UI surface shows it.
     const generic = await client.query(`
       UPDATE services SET
         hidden_from_society_admin = TRUE,
-        hidden_from_household     = FALSE,
+        hidden_from_household     = TRUE,
         hidden_from_maid_skills   = TRUE,
         is_auto_provisioned       = TRUE
       WHERE is_generic = TRUE
