@@ -64,12 +64,25 @@ router.post('/register/send-otp', async (req: Request, res: Response) => {
 // POST /api/auth/register — verify OTP then create user
 router.post('/register', async (req: Request, res: Response) => {
   try {
-    const { name, phone, password, role, societyId, address, otp } = req.body;
+    const { name, phone, password, role, societyId, address, otp, skills } = req.body;
     console.log('[Register] Received body:', JSON.stringify(req.body));
     const missingReg = [!name && 'name', !phone && 'phone', !password && 'password', !role && 'role', !societyId && 'societyId', !otp && 'otp'].filter(Boolean);
     if (missingReg.length > 0) {
       res.status(400).json({ error: `Missing required fields: ${missingReg.join(', ')}` });
       return;
+    }
+
+    // Validate skills BEFORE Twilio so a bad payload doesn't consume the OTP.
+    if (skills !== undefined && skills !== null) {
+      if (!Array.isArray(skills) || skills.some((s: any) => typeof s !== 'string')) {
+        res.status(400).json({ error: 'skills must be an array of strings' });
+        return;
+      }
+      const valid = await db.validateSkillIds(societyId, skills);
+      if (!valid) {
+        res.status(400).json({ error: 'Invalid skill ids' });
+        return;
+      }
     }
 
     // Verify OTP before creating user
@@ -80,7 +93,7 @@ router.post('/register', async (req: Request, res: Response) => {
       return;
     }
 
-    const id = await db.registerUser({ name, phone, password, role, societyId, address });
+    const id = await db.registerUser({ name, phone, password, role, societyId, address, skills: skills || [] });
     res.status(201).json({ id, message: 'Registration successful. Pending society admin approval.' });
   } catch (e: any) {
     console.error('[Auth Register Error]', e);

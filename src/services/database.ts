@@ -482,6 +482,20 @@ export const db = {
     await sql`UPDATE users SET skills = ${skills} WHERE id = ${id}`;
   },
 
+  /**
+   * Validate that every id in `skillIds` is an active society_service in `societyId`.
+   * Returns true only when all ids match. Empty input is valid (returns true).
+   */
+  validateSkillIds: async (societyId: string, skillIds: string[]): Promise<boolean> => {
+    if (!Array.isArray(skillIds) || skillIds.length === 0) return true;
+    const rows = await (sql as any)(
+      `SELECT id FROM society_services
+       WHERE id = ANY($1::text[]) AND society_id = $2 AND is_active = TRUE`,
+      [skillIds, societyId]
+    );
+    return rows.length === skillIds.length;
+  },
+
   updateAutoAccept: async (userId: string, enabled: boolean): Promise<void> => {
     await sql`UPDATE users SET auto_accept = ${enabled} WHERE id = ${userId}`;
   },
@@ -834,11 +848,36 @@ export const db = {
         [id, ...values]
       );
     }
+    // If the service was just deactivated, strip its id from every maid's skills
+    // in the same logical operation to avoid dangling references.
+    if (updates.isActive === false) {
+      const target = await sql`SELECT society_id FROM society_services WHERE id = ${id}`;
+      const societyId = target[0]?.society_id;
+      if (societyId) {
+        await (sql as any)(
+          `UPDATE users SET skills = array_remove(skills, $1)
+           WHERE society_id = $2 AND $1 = ANY(skills)`,
+          [id, societyId]
+        );
+      }
+    }
     return (await db.getSocietyServiceById(id))!;
   },
 
   deleteSocietyService: async (id: string): Promise<void> => {
+    // Soft delete + strip the id from every maid's skills array in the same atomic
+    // operation. Keeping these in sync avoids dangling references that would silently
+    // mark the maid busy for that service.
+    const target = await sql`SELECT society_id FROM society_services WHERE id = ${id}`;
+    const societyId = target[0]?.society_id;
     await sql`UPDATE society_services SET is_active = false WHERE id = ${id}`;
+    if (societyId) {
+      await (sql as any)(
+        `UPDATE users SET skills = array_remove(skills, $1)
+         WHERE society_id = $2 AND $1 = ANY(skills)`,
+        [id, societyId]
+      );
+    }
   },
 
   // ─── Bookings ───
@@ -1687,17 +1726,20 @@ export const db = {
     const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
     const dayOfWeek = dayNames[dateObj.getDay()];
 
-    // Build required skills from the booking's services
+    // Build required skills from the booking's services — society_service_id matching.
+    // Exclude contract/replacement-linked society_services because no maid carries those
+    // as a skill; including them would filter out every maid with populated skills.
     const serviceRows = await (sql as any)(
-      `SELECT COALESCE(ss.name->>'en', svc.name->>'en') as name_en
+      `SELECT DISTINCT bs.society_service_id
        FROM booking_services bs
-       LEFT JOIN society_services ss ON bs.society_service_id = ss.id
-       LEFT JOIN services svc ON ss.service_id = svc.id
-       WHERE bs.booking_id = $1`,
+       JOIN society_services ss ON ss.id = bs.society_service_id
+       WHERE bs.booking_id = $1
+         AND (ss.service_id IS NULL
+              OR ss.service_id NOT IN ('srv-contract-global','srv-replacement-global'))`,
       [bookingId]
     );
-    const requiredSkills: string[] = serviceRows
-      .map((r: any) => (r.name_en || '').toLowerCase().trim())
+    const requiredServiceIds: string[] = serviceRows
+      .map((r: any) => r.society_service_id)
       .filter(Boolean);
 
     // Find available maids with time availability and required skills
@@ -1721,15 +1763,9 @@ export const db = {
          AND u.is_verified = true
          AND ($2::text[] IS NULL OR NOT (u.id = ANY($2::text[])))
          AND (
-           $7::text[] IS NULL OR array_length($7::text[], 1) = 0
+           $7::text[] IS NULL OR cardinality($7::text[]) = 0
            OR u.skills IS NULL OR cardinality(u.skills) = 0
-           OR (
-             SELECT COUNT(*) FROM unnest($7::text[]) req_skill
-             WHERE EXISTS (
-               SELECT 1 FROM unnest(u.skills) maid_skill
-               WHERE lower(trim(maid_skill)) = req_skill
-             )
-           ) = array_length($7::text[], 1)
+           OR u.skills @> $7::text[]
          )
          AND NOT EXISTS (
            SELECT 1 FROM bookings b
@@ -1768,7 +1804,7 @@ export const db = {
                 (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) DESC,
                 u.id
        LIMIT 10`,
-      [societyId, excludeArray, date, startTime, endTime, dayOfWeek, requiredSkills.length > 0 ? requiredSkills : null]
+      [societyId, excludeArray, date, startTime, endTime, dayOfWeek, requiredServiceIds.length > 0 ? requiredServiceIds : null]
     );
 
     // Calculate pricing

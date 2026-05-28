@@ -238,6 +238,27 @@ router.get('/replacements', async (req: Request, res: Response) => {
 // POST /api/bookings
 router.post('/', async (req: Request, res: Response) => {
   try {
+    // Skill validation: ensure the chosen maid has the required services as skills.
+    // Skipped for contract bookings (no skill match required) and when the maid has
+    // no skills configured yet (graceful — mirrors the mobile filter).
+    const bookingType = req.body.bookingType || 'ADHOC';
+    if (bookingType !== 'CONTRACT' && req.body.maidId) {
+      const requiredIds: string[] = Array.isArray(req.body.societyServiceIds) && req.body.societyServiceIds.length
+        ? req.body.societyServiceIds
+        : (req.body.societyServiceId ? [req.body.societyServiceId] : []);
+      if (requiredIds.length > 0) {
+        const maid = await db.getUserById(req.body.maidId);
+        const maidSkills: string[] = (maid as any)?.skills || [];
+        if (maidSkills.length > 0) {
+          const hasAll = requiredIds.every(id => maidSkills.includes(id));
+          if (!hasAll) {
+            res.status(400).json({ error: 'Maid not skilled in selected services' });
+            return;
+          }
+        }
+      }
+    }
+
     const booking = await db.createBooking(req.body);
     // Notify maid when booking requires their manual acceptance
     if (booking.status === BookingStatus.REQUESTED && req.body.maidId) {

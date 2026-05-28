@@ -86,6 +86,20 @@ router.put('/:id/auto-accept', async (req: Request, res: Response) => {
 router.put('/:id/skills', async (req: Request, res: Response) => {
   try {
     const { skills } = req.body;
+    if (!Array.isArray(skills) || skills.some((s: any) => typeof s !== 'string')) {
+      res.status(400).json({ error: 'skills must be an array of strings' });
+      return;
+    }
+    const user = await db.getUserById(req.params.id);
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+    const valid = await db.validateSkillIds((user as any).societyId, skills);
+    if (!valid) {
+      res.status(400).json({ error: 'Invalid skill ids' });
+      return;
+    }
     await db.updateMaidSkills(req.params.id, skills);
     res.json({ success: true });
   } catch (e: any) {
