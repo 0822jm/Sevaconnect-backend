@@ -3,7 +3,10 @@ import { db } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
-router.use(authMiddleware);
+
+// Public listing endpoints — used by the registration screen (before the user
+// is authenticated) to populate the maid skill picker. Mirrors the public
+// pattern used by /societies. Mutations below require auth.
 
 // GET /api/society-services?societyId=X
 router.get('/', async (req: Request, res: Response) => {
@@ -33,6 +36,8 @@ router.get('/:id', async (req: Request, res: Response) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+router.use(authMiddleware);
 
 // POST /api/society-services — activate a global service or create exclusive
 router.post('/', async (req: Request, res: Response) => {
