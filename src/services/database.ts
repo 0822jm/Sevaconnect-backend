@@ -101,6 +101,10 @@ export interface Service {
   isGeneric: boolean;
   isActive: boolean;
   pricingConfig?: PricingConfig;
+  hiddenFromSocietyAdmin: boolean;
+  hiddenFromHousehold: boolean;
+  hiddenFromMaidSkills: boolean;
+  isAutoProvisioned: boolean;
 }
 
 export interface SocietyService {
@@ -118,6 +122,10 @@ export interface SocietyService {
   isActive: boolean;
   isExclusive: boolean;    // true when serviceId is null
   pricingConfig?: PricingConfig;
+  hiddenFromSocietyAdmin: boolean;
+  hiddenFromHousehold: boolean;
+  hiddenFromMaidSkills: boolean;
+  isAutoProvisioned: boolean;
 }
 
 export interface Booking {
@@ -269,6 +277,10 @@ const mapService = (row: any): Service => ({
   isGeneric: row.is_generic || false,
   isActive: row.is_active ?? true,
   pricingConfig: row.pricing_config ?? undefined,
+  hiddenFromSocietyAdmin: row.hidden_from_society_admin ?? false,
+  hiddenFromHousehold: row.hidden_from_household ?? false,
+  hiddenFromMaidSkills: row.hidden_from_maid_skills ?? false,
+  isAutoProvisioned: row.is_auto_provisioned ?? false,
 });
 
 const mapSocietyService = (row: any): SocietyService => ({
@@ -286,6 +298,12 @@ const mapSocietyService = (row: any): SocietyService => ({
   isActive: row.is_active ?? true,
   isExclusive: !row.service_id,
   pricingConfig: row.pricing_config ?? undefined,
+  // Visibility flags inherited from the linked global service (NULL for
+  // exclusive society services that don't link to a global row).
+  hiddenFromSocietyAdmin: row.hidden_from_society_admin ?? false,
+  hiddenFromHousehold: row.hidden_from_household ?? false,
+  hiddenFromMaidSkills: row.hidden_from_maid_skills ?? false,
+  isAutoProvisioned: row.is_auto_provisioned ?? false,
 });
 
 const mapBooking = (row: any): Booking => ({
@@ -758,6 +776,10 @@ export const db = {
       name: 'name', description: 'description', basePrice: 'base_price',
       durationMinutes: 'duration_minutes', icon: 'icon', isGeneric: 'is_generic', isActive: 'is_active',
       pricingConfig: 'pricing_config',
+      hiddenFromSocietyAdmin: 'hidden_from_society_admin',
+      hiddenFromHousehold: 'hidden_from_household',
+      hiddenFromMaidSkills: 'hidden_from_maid_skills',
+      isAutoProvisioned: 'is_auto_provisioned',
     };
     const entries = Object.entries(updates).filter(([key, v]) => v !== undefined && colMap[key]);
     if (entries.length > 0) {
@@ -796,7 +818,11 @@ export const db = {
         COALESCE(ss.icon, s.icon)              AS icon,
         COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
         ss.is_active,
-        s.pricing_config
+        s.pricing_config,
+        COALESCE(s.hidden_from_society_admin, FALSE) AS hidden_from_society_admin,
+        COALESCE(s.hidden_from_household,     FALSE) AS hidden_from_household,
+        COALESCE(s.hidden_from_maid_skills,   FALSE) AS hidden_from_maid_skills,
+        COALESCE(s.is_auto_provisioned,       FALSE) AS is_auto_provisioned
        FROM society_services ss
        LEFT JOIN services s ON ss.service_id = s.id
        WHERE ss.society_id = $1
@@ -819,7 +845,11 @@ export const db = {
         COALESCE(ss.icon, s.icon)              AS icon,
         COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
         ss.is_active,
-        s.pricing_config
+        s.pricing_config,
+        COALESCE(s.hidden_from_society_admin, FALSE) AS hidden_from_society_admin,
+        COALESCE(s.hidden_from_household,     FALSE) AS hidden_from_household,
+        COALESCE(s.hidden_from_maid_skills,   FALSE) AS hidden_from_maid_skills,
+        COALESCE(s.is_auto_provisioned,       FALSE) AS is_auto_provisioned
        FROM society_services ss
        LEFT JOIN services s ON ss.service_id = s.id
        WHERE ss.id = $1`,
