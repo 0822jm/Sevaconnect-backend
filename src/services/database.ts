@@ -693,8 +693,8 @@ export const db = {
       throw new Error('A society with this code already exists.');
     }
 
-    await sql`INSERT INTO users (id, name, username, password_hash, role, is_verified, phone, must_change_password)
-       VALUES (${adminId}, ${adminName}, ${adminUsername}, ${passwordHash}, ${UserRole.SOCIETY_ADMIN}, TRUE, ${society.phone}, TRUE)`;
+    await sql`INSERT INTO users (id, name, username, password_hash, role, is_verified, phone, skills, must_change_password)
+       VALUES (${adminId}, ${adminName}, ${adminUsername}, ${passwordHash}, ${UserRole.SOCIETY_ADMIN}, TRUE, ${society.phone}, ${[]}, TRUE)`;
 
     try {
       await sql`INSERT INTO societies (id, name, address, code) VALUES (${socId}, ${society.name}, ${society.address}, ${society.code})`;
