@@ -159,6 +159,7 @@ export interface Booking {
   serviceNames?: string;
   serviceCount?: number;
   maidName?: string;
+  maidPhone?: string;
   householdName?: string;
   householdAddress?: string;
   householdPhone?: string;
@@ -336,6 +337,7 @@ const mapBooking = (row: any): Booking => ({
   serviceNames: row.service_names || undefined,
   serviceCount: row.service_count != null ? Number(row.service_count) : undefined,
   maidName: row.maid_name,
+  maidPhone: row.maid_phone,
   householdName: row.household_name,
   householdAddress: row.household_address,
   householdPhone: row.household_phone,
@@ -960,6 +962,7 @@ export const db = {
     const rows = await (sql as any)(
       `SELECT sub.*,
         m.name as maid_name,
+        m.phone as maid_phone,
         h.name as household_name,
         h.address as household_address,
         h.phone as household_phone,
