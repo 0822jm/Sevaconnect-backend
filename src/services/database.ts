@@ -218,8 +218,10 @@ export interface ContractGroup {
   effEndDate?: string;
   status: string;
   maidName?: string;
+  maidPhone?: string;
   householdName?: string;
   householdAddress?: string;
+  householdPhone?: string;
   serviceIcon?: string;
   stagingContractId?: string;
 }
@@ -1684,8 +1686,10 @@ export const db = {
         b.status,
         b.staging_contract_id,
         u_m.name AS maid_name,
+        u_m.phone AS maid_phone,
         u_h.name AS household_name,
         u_h.address AS household_address,
+        u_h.phone AS household_phone,
         COALESCE(ss.icon, svc.icon) AS service_icon
       FROM bookings b
       JOIN users u_m ON b.maid_id = u_m.id
@@ -1711,8 +1715,10 @@ export const db = {
       effEndDate: r.eff_end_date instanceof Date ? r.eff_end_date.toISOString().substring(0, 10) : r.eff_end_date,
       status: r.status,
       maidName: r.maid_name,
+      maidPhone: r.maid_phone,
       householdName: r.household_name,
       householdAddress: r.household_address,
+      householdPhone: r.household_phone,
       serviceIcon: r.service_icon,
       stagingContractId: r.staging_contract_id,
     }));
