@@ -1,5 +1,6 @@
 import { neon } from '@neondatabase/serverless';
 import { generateId, hashPassword } from '../utils/helpers';
+import { formatPhoneE164 } from './twilio';
 
 // Generate a random 4-digit OTP (1000-9999)
 const generate4DigitOtp = (): string => {
@@ -479,7 +480,10 @@ export const db = {
   },
 
   isPhoneRegistered: async (phone: string): Promise<boolean> => {
-    const existing = await sql`SELECT id FROM users WHERE phone = ${phone} OR username = ${phone}`;
+    // Normalize so a dup check on "+919876500001" matches stored "+919876500001"
+    // regardless of the form the caller passes.
+    const normalized = formatPhoneE164(String(phone));
+    const existing = await sql`SELECT id FROM users WHERE phone = ${normalized} OR username = ${normalized}`;
     return existing.length > 0;
   },
 
@@ -488,20 +492,24 @@ export const db = {
       throw new Error('Username is required.');
     }
     const username = user.username.trim();
+    // Normalize the phone to E.164 (+919876543210) so storage is consistent
+    // regardless of whether the mobile form sends "+44..." or a legacy 10-digit
+    // Indian number. The duplicate check + insert use the canonical form.
+    const phone = user.phone ? formatPhoneE164(String(user.phone)) : user.phone;
 
     // Conflict check: phone collides with anyone's phone or username, AND the
     // chosen username collides with anyone's username or phone. This prevents
     // shadowing existing phones too (since login matches username OR phone).
     const existing = await sql`
       SELECT id, phone, username FROM users
-      WHERE phone = ${user.phone}
-         OR username = ${user.phone}
+      WHERE phone = ${phone}
+         OR username = ${phone}
          OR phone = ${username}
          OR username = ${username}
     `;
     if (existing.length > 0) {
       const usernameConflict = existing.some((r: any) => r.username === username || r.phone === username);
-      if (usernameConflict && username !== user.phone) {
+      if (usernameConflict && username !== phone) {
         throw new Error('This username is already taken.');
       }
       throw new Error('This phone number is already registered to an account.');
@@ -510,7 +518,7 @@ export const db = {
     const id = generateId('u');
     const passwordHash = user.password ? await hashPassword(user.password) : '';
     await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password)
-       VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${user.phone}, ${user.address || null}, ${user.skills || []}, FALSE)`;
+       VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${phone}, ${user.address || null}, ${user.skills || []}, FALSE)`;
     return id;
   },
 
@@ -709,20 +717,22 @@ export const db = {
     // explicit fields collected at onboarding. Fall back to legacy auto-values
     // for older callers that don't send them.
     const adminName = (society.adminName && society.adminName.trim()) || `${society.name} Admin`;
-    const adminUsername = (society.adminUsername && society.adminUsername.trim()) || society.phone;
+    // Normalize phone to E.164 so storage is consistent regardless of input form.
+    const phone = formatPhoneE164(String(society.phone));
+    const adminUsername = (society.adminUsername && society.adminUsername.trim()) || phone;
 
     // Conflict check: an existing user with this phone, OR with this username,
     // OR a user whose username/phone equals our chosen phone or username.
     const existingUser = await sql`
       SELECT id, phone, username FROM users
-      WHERE phone = ${society.phone}
-         OR username = ${society.phone}
+      WHERE phone = ${phone}
+         OR username = ${phone}
          OR phone = ${adminUsername}
          OR username = ${adminUsername}
     `;
     if (existingUser.length > 0) {
       const conflictsOnUsername = existingUser.some((r: any) => r.username === adminUsername || r.phone === adminUsername);
-      if (conflictsOnUsername && adminUsername !== society.phone) {
+      if (conflictsOnUsername && adminUsername !== phone) {
         throw new Error('Admin username is already taken.');
       }
       throw new Error('Admin phone number is already registered to another account.');
@@ -734,7 +744,7 @@ export const db = {
     }
 
     await sql`INSERT INTO users (id, name, username, password_hash, role, is_verified, phone, skills, must_change_password)
-       VALUES (${adminId}, ${adminName}, ${adminUsername}, ${passwordHash}, ${UserRole.SOCIETY_ADMIN}, TRUE, ${society.phone}, ${[]}, TRUE)`;
+       VALUES (${adminId}, ${adminName}, ${adminUsername}, ${passwordHash}, ${UserRole.SOCIETY_ADMIN}, TRUE, ${phone}, ${[]}, TRUE)`;
 
     try {
       await sql`INSERT INTO societies (id, name, address, code) VALUES (${socId}, ${society.name}, ${society.address}, ${society.code})`;
