@@ -337,7 +337,9 @@ const mapBooking = (row: any): Booking => ({
   priceAtBooking: row.price_at_booking ? Number(row.price_at_booking) : undefined,
   serviceName: row.service_name ? parseLocalized(row.service_name) : undefined,
   serviceIcon: row.service_icon || undefined,
-  serviceNames: row.service_names || undefined,
+  serviceNamesArr: row.service_names_arr
+    ? (row.service_names_arr as any[]).map((n: any) => parseLocalized(n))
+    : undefined,
   serviceCount: row.service_count != null ? Number(row.service_count) : undefined,
   maidName: row.maid_name,
   maidPhone: row.maid_phone,
@@ -980,7 +982,7 @@ export const db = {
         h.phone as household_phone,
         COALESCE(ss.name, svc.name) as service_name,
         COALESCE(svc_agg.svc_icon, COALESCE(ss.icon, svc.icon)) as service_icon,
-        svc_agg.service_names,
+        svc_agg.service_names_arr,
         svc_agg.service_count
       FROM (
         SELECT DISTINCT ON (b.id) b.*
@@ -995,7 +997,7 @@ export const db = {
       LEFT JOIN services svc ON ss.service_id = svc.id
       LEFT JOIN LATERAL (
         SELECT
-          string_agg(COALESCE(ss2.name->>'en', svc2.name->>'en'), ', ' ORDER BY bs.sort_order) AS service_names,
+          jsonb_agg(COALESCE(ss2.name, svc2.name) ORDER BY bs.sort_order) AS service_names_arr,
           (array_agg(COALESCE(ss2.icon, svc2.icon) ORDER BY bs.sort_order))[1] AS svc_icon,
           COUNT(*)::int AS service_count
         FROM booking_services bs
@@ -1017,7 +1019,7 @@ export const db = {
         h.address as household_address,
         COALESCE(ss.name, svc.name) as service_name,
         COALESCE(svc_agg.svc_icon, COALESCE(ss.icon, svc.icon)) as service_icon,
-        svc_agg.service_names,
+        svc_agg.service_names_arr,
         svc_agg.service_count
       FROM (
         SELECT DISTINCT ON (b.id) b.*
@@ -1033,7 +1035,7 @@ export const db = {
       LEFT JOIN services svc ON ss.service_id = svc.id
       LEFT JOIN LATERAL (
         SELECT
-          string_agg(COALESCE(ss2.name->>'en', svc2.name->>'en'), ', ' ORDER BY bs.sort_order) AS service_names,
+          jsonb_agg(COALESCE(ss2.name, svc2.name) ORDER BY bs.sort_order) AS service_names_arr,
           (array_agg(COALESCE(ss2.icon, svc2.icon) ORDER BY bs.sort_order))[1] AS svc_icon,
           COUNT(*)::int AS service_count
         FROM booking_services bs
