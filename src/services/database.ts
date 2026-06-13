@@ -158,6 +158,7 @@ export interface Booking {
   serviceName?: LocalizedString;
   serviceIcon?: string;
   serviceNames?: string;
+  serviceNamesArr?: LocalizedString[];
   serviceCount?: number;
   maidName?: string;
   maidPhone?: string;
