@@ -242,6 +242,29 @@ router.post('/', async (req: Request, res: Response) => {
     // Skipped for contract bookings (no skill match required) and when the maid has
     // no skills configured yet (graceful — mirrors the mobile filter).
     const bookingType = req.body.bookingType || 'ADHOC';
+
+    // Working-hours validation for ADHOC bookings
+    if (bookingType === 'ADHOC') {
+      const { startTime, endTime } = req.body;
+      if (startTime && endTime) {
+        const toMins = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+        const startMins = toMins(startTime);
+        const endMins   = toMins(endTime);
+        if (startMins < toMins('07:00') || startMins > toMins('21:00')) {
+          res.status(400).json({ error: 'Start time must be between 7:00 AM and 9:00 PM' });
+          return;
+        }
+        if (endMins > toMins('22:00')) {
+          res.status(400).json({ error: 'End time cannot be later than 10:00 PM' });
+          return;
+        }
+        if (endMins - startMins < 60) {
+          res.status(400).json({ error: 'Minimum booking duration is 1 hour' });
+          return;
+        }
+      }
+    }
+
     if (bookingType !== 'CONTRACT' && req.body.maidId) {
       const requiredIds: string[] = Array.isArray(req.body.societyServiceIds) && req.body.societyServiceIds.length
         ? req.body.societyServiceIds

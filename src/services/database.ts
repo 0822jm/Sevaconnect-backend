@@ -77,6 +77,8 @@ export interface User {
   reviewCount?: number;
   leaves?: string[];
   autoAccept?: boolean;
+  autoAcceptFrom?: string;
+  autoAcceptTo?: string;
   trustScore?: number;
 }
 
@@ -268,6 +270,8 @@ const mapUser = (row: any): User => ({
   address: row.address,
   mustChangePassword: row.must_change_password || false,
   autoAccept: row.auto_accept ?? false,
+  autoAcceptFrom: row.auto_accept_from ? String(row.auto_accept_from).substring(0, 5) : undefined,
+  autoAcceptTo: row.auto_accept_to ? String(row.auto_accept_to).substring(0, 5) : undefined,
   trustScore: row.trust_score != null ? Number(row.trust_score) : null,
   preferredMaidId: row.preferred_maid_id || null,
 });
@@ -520,8 +524,8 @@ export const db = {
 
     const id = generateId('u');
     const passwordHash = user.password ? await hashPassword(user.password) : '';
-    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password)
-       VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${phone}, ${user.address || null}, ${user.skills || []}, FALSE)`;
+    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password, auto_accept, auto_accept_from, auto_accept_to)
+       VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${phone}, ${user.address || null}, ${user.skills || []}, FALSE, ${user.autoAccept || false}, ${user.autoAcceptFrom || null}, ${user.autoAcceptTo || null})`;
     return id;
   },
 
@@ -547,8 +551,12 @@ export const db = {
     return rows.length === skillIds.length;
   },
 
-  updateAutoAccept: async (userId: string, enabled: boolean): Promise<void> => {
-    await sql`UPDATE users SET auto_accept = ${enabled} WHERE id = ${userId}`;
+  updateAutoAccept: async (userId: string, enabled: boolean, fromTime?: string | null, toTime?: string | null): Promise<void> => {
+    if (fromTime !== undefined || toTime !== undefined) {
+      await sql`UPDATE users SET auto_accept = ${enabled}, auto_accept_from = ${fromTime ?? null}, auto_accept_to = ${toTime ?? null} WHERE id = ${userId}`;
+    } else {
+      await sql`UPDATE users SET auto_accept = ${enabled} WHERE id = ${userId}`;
+    }
   },
 
   toggleLeave: async (id: string, date: string): Promise<string[]> => {
@@ -1089,38 +1097,54 @@ export const db = {
 
     // Write booking_services rows for new bookings (both single and multi-service)
     const ssIdsToInsert = societyServiceIds || (legacySsId ? [legacySsId] : []);
+    const toMins = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+    const bookedDurationMins = (booking.startTime && booking.endTime)
+      ? Math.max(toMins(booking.endTime) - toMins(booking.startTime), 60)
+      : 60;
     if (ssIdsToInsert.length > 0) {
       for (let i = 0; i < ssIdsToInsert.length; i++) {
         const ssId = ssIdsToInsert[i];
         const ssRows = await (sql as any)(
-          `SELECT COALESCE(ss.price, s.base_price) as price,
-                  COALESCE(ss.duration, s.duration_minutes) as duration
+          `SELECT COALESCE(ss.price, s.base_price) as price, s.is_generic
            FROM society_services ss
            LEFT JOIN services s ON ss.service_id = s.id
            WHERE ss.id = $1`,
           [ssId]
         );
-        const price = ssRows[0]?.price != null ? Number(ssRows[0].price) : (booking.priceAtBooking || 0);
-        const duration = ssRows[0]?.duration != null ? Number(ssRows[0].duration) : 0;
+        const isGeneric = ssRows[0]?.is_generic ?? false;
+        const hourlyRate = ssRows[0]?.price != null ? Number(ssRows[0].price) : 0;
+        const servicePrice = isGeneric
+          ? (booking.customPrice || booking.priceAtBooking || 0)
+          : Math.round(hourlyRate * bookedDurationMins / 60);
         const inputs = booking.bookingInputs?.[ssId] ?? null;
         await (sql as any)(
           `INSERT INTO booking_services (id, booking_id, society_service_id, price_at_booking, duration_minutes, sort_order, booking_inputs)
            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
            ON CONFLICT (id) DO NOTHING`,
-          [generateId('bks'), id, ssId, price, duration, i, inputs ? JSON.stringify(inputs) : null]
+          [generateId('bks'), id, ssId, servicePrice, bookedDurationMins, i, inputs ? JSON.stringify(inputs) : null]
         );
       }
     }
 
     // Auto-accept: if the maid has opted in, immediately confirm non-contract ADHOC bookings
     if (bookingType === 'ADHOC' && (!booking.status || booking.status === BookingStatus.REQUESTED)) {
-      const maidRows = await sql`SELECT auto_accept FROM users WHERE id = ${booking.maidId}`;
+      const maidRows = await sql`SELECT auto_accept, auto_accept_from, auto_accept_to FROM users WHERE id = ${booking.maidId}`;
       if (maidRows[0]?.auto_accept) {
-        await (sql as any)(
-          `UPDATE bookings SET status = $1, auto_accepted = true WHERE id = $2 AND eff_end_date = '3499-12-31'`,
-          [BookingStatus.CONFIRMED, id]
-        );
-        return { ...booking, id, bookingType, status: BookingStatus.CONFIRMED, autoAccepted: true, isReviewed: false } as Booking;
+        const autoFrom = maidRows[0].auto_accept_from;
+        const autoTo   = maidRows[0].auto_accept_to;
+        let inWindow = true;
+        if (autoFrom && autoTo && booking.startTime) {
+          const toMinsAA = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+          const bk = toMinsAA(booking.startTime);
+          inWindow = bk >= toMinsAA(String(autoFrom).substring(0, 5)) && bk <= toMinsAA(String(autoTo).substring(0, 5));
+        }
+        if (inWindow) {
+          await (sql as any)(
+            `UPDATE bookings SET status = $1, auto_accepted = true WHERE id = $2 AND eff_end_date = '3499-12-31'`,
+            [BookingStatus.CONFIRMED, id]
+          );
+          return { ...booking, id, bookingType, status: BookingStatus.CONFIRMED, autoAccepted: true, isReviewed: false } as Booking;
+        }
       }
     }
 
@@ -1568,10 +1592,9 @@ export const db = {
       [replacementSsId]
     );
     const hourlyRate = ssRows.length > 0 ? Number(ssRows[0].effective_price) : 150;
-    const startH = parseInt(contract.start_time.split(':')[0]);
-    const endH = parseInt(contract.end_time.split(':')[0]);
-    const durationHours = Math.max(endH - startH, 1);
-    const replacementCost = hourlyRate * durationHours;
+    const toMinsRep = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+    const durationMins = Math.max(toMinsRep(contract.end_time) - toMinsRep(contract.start_time), 60);
+    const replacementCost = Math.round(hourlyRate * durationMins / 60);
 
     const newId = generateId('bk');
     await (sql as any)(
@@ -1905,10 +1928,9 @@ export const db = {
 
     // Calculate pricing
     let hourlyRate = 150;
-    let durationHours = 1;
-    const startH = parseInt(startTime.split(':')[0]);
-    const endH = parseInt(endTime.split(':')[0]);
-    durationHours = Math.max(endH - startH, 1);
+    const toMinsRM = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+    const durationMinsRM = Math.max(toMinsRM(endTime) - toMinsRM(startTime), 60);
+    const durationHours = durationMinsRM / 60;
 
     if (isContractReplacement) {
       const replacementSsId = societyId ? await db.findOrCreateReplacementSocietyService(societyId) : null;
@@ -1929,7 +1951,7 @@ export const db = {
         rating: Number(Number(m.avg_rating).toFixed(1)),
         trustScore: Number(m.trust_score),
         autoAccept: Boolean(m.auto_accept),
-        replacementCost: isContractReplacement ? hourlyRate * durationHours : Number(booking.priceAtBooking || 0),
+        replacementCost: isContractReplacement ? Math.round(hourlyRate * durationMinsRM / 60) : Number(booking.priceAtBooking || 0),
       })),
       hourlyRate,
       durationHours,

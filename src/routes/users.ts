@@ -70,12 +70,34 @@ router.put('/:id/push-token', async (req: Request, res: Response) => {
 // PUT /api/users/:id/auto-accept
 router.put('/:id/auto-accept', async (req: Request, res: Response) => {
   try {
-    const { enabled } = req.body;
+    const { enabled, fromTime, toTime } = req.body;
     if (typeof enabled !== 'boolean') {
       res.status(400).json({ error: 'enabled must be a boolean' });
       return;
     }
-    await db.updateAutoAccept(req.params.id, enabled);
+    const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (fromTime !== undefined && fromTime !== null && !timeRe.test(fromTime)) {
+      res.status(400).json({ error: 'fromTime must be HH:MM' });
+      return;
+    }
+    if (toTime !== undefined && toTime !== null && !timeRe.test(toTime)) {
+      res.status(400).json({ error: 'toTime must be HH:MM' });
+      return;
+    }
+    if (fromTime != null && toTime != null) {
+      const toMins = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+      if (toMins(toTime) <= toMins(fromTime)) {
+        res.status(400).json({ error: 'toTime must be after fromTime' });
+        return;
+      }
+    }
+    const hasTimePatch = fromTime !== undefined || toTime !== undefined;
+    await db.updateAutoAccept(
+      req.params.id,
+      enabled,
+      hasTimePatch ? (fromTime ?? null) : undefined,
+      hasTimePatch ? (toTime ?? null) : undefined
+    );
     res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });

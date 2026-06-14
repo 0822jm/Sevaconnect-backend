@@ -49,6 +49,25 @@ router.post('/register/send-otp', async (req: Request, res: Response) => {
       return;
     }
 
+    // Validate auto-accept time fields before consuming OTP
+    const { autoAcceptFrom, autoAcceptTo } = req.body;
+    const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (autoAcceptFrom !== undefined && autoAcceptFrom !== null && !timeRe.test(autoAcceptFrom)) {
+      res.status(400).json({ error: 'autoAcceptFrom must be HH:MM' });
+      return;
+    }
+    if (autoAcceptTo !== undefined && autoAcceptTo !== null && !timeRe.test(autoAcceptTo)) {
+      res.status(400).json({ error: 'autoAcceptTo must be HH:MM' });
+      return;
+    }
+    if (autoAcceptFrom != null && autoAcceptTo != null) {
+      const toMins = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+      if (toMins(autoAcceptTo) <= toMins(autoAcceptFrom)) {
+        res.status(400).json({ error: 'autoAcceptTo must be after autoAcceptFrom' });
+        return;
+      }
+    }
+
     const formattedPhone = formatPhoneE164(phone);
     const result = await startTwilioVerify(formattedPhone);
     if (result.success) {
@@ -66,7 +85,7 @@ router.post('/register/send-otp', async (req: Request, res: Response) => {
 // POST /api/auth/register — verify OTP then create user
 router.post('/register', async (req: Request, res: Response) => {
   try {
-    const { name, phone, username, password, role, societyId, address, otp, skills } = req.body;
+    const { name, phone, username, password, role, societyId, address, otp, skills, autoAccept, autoAcceptFrom, autoAcceptTo } = req.body;
     console.log('[Register] Received body:', JSON.stringify(req.body));
     const missingReg = [!name && 'name', !phone && 'phone', !username && 'username', !password && 'password', !role && 'role', !societyId && 'societyId', !otp && 'otp'].filter(Boolean);
     if (missingReg.length > 0) {
@@ -95,7 +114,7 @@ router.post('/register', async (req: Request, res: Response) => {
       return;
     }
 
-    const id = await db.registerUser({ name, phone, username, password, role, societyId, address, skills: skills || [] });
+    const id = await db.registerUser({ name, phone, username, password, role, societyId, address, skills: skills || [], autoAccept: autoAccept || false, autoAcceptFrom: autoAcceptFrom || null, autoAcceptTo: autoAcceptTo || null });
     res.status(201).json({ id, message: 'Registration successful. Pending society admin approval.' });
   } catch (e: any) {
     console.error('[Auth Register Error]', e);

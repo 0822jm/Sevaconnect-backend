@@ -32,9 +32,9 @@ async function migrate() {
     // ─── 1a. Insert new global services ───
     console.log('Step 1a: Insert new global services');
     const newGlobals = [
-      { id: 'srv-cleaning-global', name: { en: 'Cleaning' },           icon: '🧹', price: 300, duration: 120 },
-      { id: 'srv-cooking-global',  name: { en: 'Cooking' },            icon: '🍳', price: 250, duration: 60  },
-      { id: 'srv-laundry-global',  name: { en: 'Laundry / Ironing' },  icon: '🧺', price: 200, duration: 90  },
+      { id: 'srv-cleaning-global', name: { en: 'Cleaning' },           icon: '🧹', price: 75,  duration: 120 },
+      { id: 'srv-cooking-global',  name: { en: 'Cooking' },            icon: '🍳', price: 120, duration: 60  },
+      { id: 'srv-laundry-global',  name: { en: 'Laundry / Ironing' },  icon: '🧺', price: 50,  duration: 90  },
     ];
     for (const g of newGlobals) {
       await client.query(
