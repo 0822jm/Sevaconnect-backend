@@ -245,7 +245,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     // Working-hours validation for ADHOC bookings
     if (bookingType === 'ADHOC') {
-      const { startTime, endTime } = req.body;
+      const { startTime, endTime, workStartDate } = req.body;
       if (startTime && endTime) {
         const toMins = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
         const startMins = toMins(startTime);
@@ -260,6 +260,15 @@ router.post('/', async (req: Request, res: Response) => {
         }
         if (endMins - startMins < 60) {
           res.status(400).json({ error: 'Minimum booking duration is 1 hour' });
+          return;
+        }
+      }
+      // Booking must be at least 1 hour in the future (validated in IST, UTC+5:30)
+      if (workStartDate && startTime) {
+        const bookingDateTime = new Date(`${workStartDate}T${startTime}:00+05:30`);
+        const oneHourFromNow  = new Date(Date.now() + 60 * 60 * 1000);
+        if (bookingDateTime < oneHourFromNow) {
+          res.status(400).json({ error: 'Booking must be at least 1 hour in the future' });
           return;
         }
       }
