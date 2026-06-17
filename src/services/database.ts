@@ -557,6 +557,27 @@ export const db = {
     } else {
       await sql`UPDATE users SET auto_accept = ${enabled} WHERE id = ${userId}`;
     }
+    // Retroactively confirm any REQUESTED ADHOC bookings that now fall within the new window
+    if (enabled && fromTime && toTime) {
+      const toMins = (t: string) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+      const wStart = toMins(fromTime);
+      const wEnd   = toMins(toTime);
+      const pending = await (sql as any)(
+        `SELECT id, start_time, end_time FROM bookings
+         WHERE maid_id = $1 AND status = 'REQUESTED' AND booking_type = 'ADHOC' AND eff_end_date = '3499-12-31'`,
+        [userId]
+      );
+      for (const b of pending) {
+        const bStart = toMins(String(b.start_time).substring(0, 5));
+        const bEnd   = toMins(String(b.end_time).substring(0, 5));
+        if (bStart >= wStart && bEnd <= wEnd) {
+          await (sql as any)(
+            `UPDATE bookings SET status = 'CONFIRMED', auto_accepted = true WHERE id = $1 AND eff_end_date = '3499-12-31'`,
+            [b.id]
+          );
+        }
+      }
+    }
   },
 
   toggleLeave: async (id: string, date: string): Promise<string[]> => {
@@ -1133,10 +1154,11 @@ export const db = {
         const autoFrom = maidRows[0].auto_accept_from;
         const autoTo   = maidRows[0].auto_accept_to;
         let inWindow = true;
-        if (autoFrom && autoTo && booking.startTime) {
-          const toMinsAA = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-          const bk = toMinsAA(booking.startTime);
-          inWindow = bk >= toMinsAA(String(autoFrom).substring(0, 5)) && bk <= toMinsAA(String(autoTo).substring(0, 5));
+        if (autoFrom && autoTo && booking.startTime && booking.endTime) {
+          const toMinsAA = (t: string) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+          const wStart = toMinsAA(String(autoFrom).substring(0, 5));
+          const wEnd   = toMinsAA(String(autoTo).substring(0, 5));
+          inWindow = toMinsAA(booking.startTime) >= wStart && toMinsAA(booking.endTime) <= wEnd;
         }
         if (inWindow) {
           await (sql as any)(
