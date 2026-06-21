@@ -873,14 +873,14 @@ export const db = {
     const rows = await (sql as any)(
       `SELECT
         ss.id, ss.society_id, ss.service_id,
-        COALESCE(ss.name, s.name)               AS name,
-        COALESCE(ss.description, s.description) AS description,
-        COALESCE(ss.price, s.base_price)        AS effective_price,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.name          ELSE COALESCE(ss.name, s.name) END               AS name,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.description   ELSE COALESCE(ss.description, s.description) END  AS description,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.base_price    ELSE COALESCE(ss.price, s.base_price) END         AS effective_price,
         s.base_price                            AS base_price,
-        ss.price                                AS price_override,
-        COALESCE(ss.duration, s.duration_minutes) AS duration_minutes,
-        COALESCE(ss.icon, s.icon)              AS icon,
-        COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN NULL            ELSE ss.price END                                AS price_override,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.duration_minutes ELSE COALESCE(ss.duration, s.duration_minutes) END AS duration_minutes,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.icon          ELSE COALESCE(ss.icon, s.icon) END               AS icon,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.is_generic    ELSE COALESCE(ss.is_generic, s.is_generic) END   AS is_generic,
         ss.is_active,
         s.pricing_config,
         COALESCE(s.hidden_from_society_admin, FALSE) AS hidden_from_society_admin,
@@ -900,14 +900,14 @@ export const db = {
     const rows = await (sql as any)(
       `SELECT
         ss.id, ss.society_id, ss.service_id,
-        COALESCE(ss.name, s.name)               AS name,
-        COALESCE(ss.description, s.description) AS description,
-        COALESCE(ss.price, s.base_price)        AS effective_price,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.name          ELSE COALESCE(ss.name, s.name) END               AS name,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.description   ELSE COALESCE(ss.description, s.description) END  AS description,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.base_price    ELSE COALESCE(ss.price, s.base_price) END         AS effective_price,
         s.base_price                            AS base_price,
-        ss.price                                AS price_override,
-        COALESCE(ss.duration, s.duration_minutes) AS duration_minutes,
-        COALESCE(ss.icon, s.icon)              AS icon,
-        COALESCE(ss.is_generic, s.is_generic)  AS is_generic,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN NULL            ELSE ss.price END                                AS price_override,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.duration_minutes ELSE COALESCE(ss.duration, s.duration_minutes) END AS duration_minutes,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.icon          ELSE COALESCE(ss.icon, s.icon) END               AS icon,
+        CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.is_generic    ELSE COALESCE(ss.is_generic, s.is_generic) END   AS is_generic,
         ss.is_active,
         s.pricing_config,
         COALESCE(s.hidden_from_society_admin, FALSE) AS hidden_from_society_admin,
@@ -1126,7 +1126,9 @@ export const db = {
       for (let i = 0; i < ssIdsToInsert.length; i++) {
         const ssId = ssIdsToInsert[i];
         const ssRows = await (sql as any)(
-          `SELECT COALESCE(ss.price, s.base_price) as price, s.is_generic
+          `SELECT
+             CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.base_price ELSE COALESCE(ss.price, s.base_price) END as price,
+             s.is_generic
            FROM society_services ss
            LEFT JOIN services s ON ss.service_id = s.id
            WHERE ss.id = $1`,
@@ -1608,7 +1610,7 @@ export const db = {
 
     // Calculate replacement cost: hourly rate × duration hours
     const ssRows = await (sql as any)(
-      `SELECT COALESCE(ss.price, s.base_price) as effective_price
+      `SELECT CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.base_price ELSE COALESCE(ss.price, s.base_price) END as effective_price
        FROM society_services ss LEFT JOIN services s ON ss.service_id = s.id
        WHERE ss.id = $1`,
       [replacementSsId]
@@ -1958,7 +1960,7 @@ export const db = {
       const replacementSsId = societyId ? await db.findOrCreateReplacementSocietyService(societyId) : null;
       if (replacementSsId) {
         const ssRows = await (sql as any)(
-          `SELECT COALESCE(ss.price, s.base_price) as effective_price
+          `SELECT CASE WHEN COALESCE(s.hidden_from_society_admin, FALSE) THEN s.base_price ELSE COALESCE(ss.price, s.base_price) END as effective_price
            FROM society_services ss LEFT JOIN services s ON ss.service_id = s.id WHERE ss.id = $1`,
           [replacementSsId]
         );
