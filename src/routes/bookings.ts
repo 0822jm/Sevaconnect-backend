@@ -14,6 +14,8 @@ router.get('/user/:userId', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'role query param required (MAID or HOUSEHOLD)' });
       return;
     }
+    // Lazy on-fetch fallback: ensure stale bookings are swept before returning (throttled ~1/hr)
+    await db.maybeSweepStaleBookings();
     const bookings = await db.getBookingsForUser(req.params.userId, role as UserRole);
     res.json(bookings);
   } catch (e: any) {
@@ -211,6 +213,7 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
 // GET /api/bookings/society/:societyId
 router.get('/society/:societyId', async (req: Request, res: Response) => {
   try {
+    await db.maybeSweepStaleBookings();
     const bookings = await db.getBookingsBySociety(req.params.societyId);
     res.json(bookings);
   } catch (e: any) {

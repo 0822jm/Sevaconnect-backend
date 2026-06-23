@@ -56,6 +56,8 @@ export enum BookingStatus {
   COMPLETED = 'COMPLETED',
   CANCELLED = 'CANCELLED',
   TERMINATED = 'TERMINATED',
+  NO_SHOW = 'NO_SHOW',        // confirmed but never started; date passed
+  INCOMPLETE = 'INCOMPLETE',  // started (start OTP) but no end OTP; date passed
 }
 
 export type BookingType = 'ADHOC' | 'CONTRACT' | 'REPLACEMENT';
@@ -369,6 +371,9 @@ const mapMessage = (row: any): ChatMessage => ({
 });
 
 // ── Database Operations ──
+
+// Throttle for the lazy on-fetch stale-booking sweep (see maybeSweepStaleBookings).
+let _lastStaleSweepAt = 0;
 
 export const db = {
   // ─── Auth ───
@@ -1077,6 +1082,44 @@ export const db = {
       [societyId]
     );
     return rows.map(mapBooking);
+  },
+
+  // Sweep stale ADHOC bookings whose scheduled day has fully passed (IST):
+  //   CONFIRMED + no start OTP        -> NO_SHOW
+  //   IN_PROGRESS (started, no end)   -> INCOMPLETE
+  // Idempotent: only touches current rows in those exact states. Safe to run repeatedly.
+  sweepStaleBookings: async (): Promise<{ noShow: number; incomplete: number }> => {
+    const noShow = await (sql as any)(
+      `UPDATE bookings SET status = 'NO_SHOW'
+       WHERE eff_end_date = '3499-12-31'
+         AND booking_type = 'ADHOC'
+         AND status = 'CONFIRMED'
+         AND start_otp_time IS NULL
+         AND work_start_date < (now() AT TIME ZONE 'Asia/Kolkata')::date
+       RETURNING id`,
+    );
+    const incomplete = await (sql as any)(
+      `UPDATE bookings SET status = 'INCOMPLETE'
+       WHERE eff_end_date = '3499-12-31'
+         AND booking_type = 'ADHOC'
+         AND status = 'IN_PROGRESS'
+         AND end_otp_time IS NULL
+         AND work_start_date < (now() AT TIME ZONE 'Asia/Kolkata')::date
+       RETURNING id`,
+    );
+    return { noShow: noShow.length, incomplete: incomplete.length };
+  },
+
+  // Throttled wrapper for the lazy on-fetch fallback: runs the sweep at most once/hour.
+  maybeSweepStaleBookings: async (): Promise<void> => {
+    const now = Date.now();
+    if (now - _lastStaleSweepAt < 60 * 60 * 1000) return;
+    _lastStaleSweepAt = now;
+    try {
+      await db.sweepStaleBookings();
+    } catch (e) {
+      console.error('[sweepStaleBookings] failed', e);
+    }
   },
 
   createBooking: async (booking: any): Promise<Booking> => {
