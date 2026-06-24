@@ -4,13 +4,22 @@ export interface VerifyResponse {
   error?: string;
 }
 
-const getConfig = () => ({
-  accountSid: process.env.TWILIO_ACCOUNT_SID!,
-  authToken: process.env.TWILIO_AUTH_TOKEN!,
-  verifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID!,
-  demoPhone: process.env.TWILIO_DEMO_PHONE || '+919999999999',
-  masterOtp: process.env.TWILIO_MASTER_OTP || '1234',
-});
+const getConfig = () => {
+  // Demo overrides are OPT-IN and OFF by default. Production therefore always sends the
+  // OTP to the real number and never accepts a master code. To enable the testing
+  // conveniences locally, set TWILIO_DEMO_MODE=true (and optionally TWILIO_DEMO_PHONE to
+  // route every OTP to one test number, TWILIO_MASTER_OTP for a bypass code). The
+  // NODE_ENV guard means even an accidental TWILIO_DEMO_MODE=true is ignored in production.
+  const demoMode =
+    process.env.TWILIO_DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
+  return {
+    accountSid: process.env.TWILIO_ACCOUNT_SID!,
+    authToken: process.env.TWILIO_AUTH_TOKEN!,
+    verifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID!,
+    demoPhone: demoMode ? (process.env.TWILIO_DEMO_PHONE || '') : '',
+    masterOtp: demoMode ? (process.env.TWILIO_MASTER_OTP || '') : '',
+  };
+};
 
 export const formatPhoneE164 = (phone: string): string => {
   const digits = phone.replace(/\D/g, '');
@@ -55,8 +64,8 @@ export const startTwilioVerify = async (to: string): Promise<VerifyResponse> => 
 export const checkTwilioVerify = async (to: string, code: string): Promise<VerifyResponse> => {
   const config = getConfig();
 
-  if (code === config.masterOtp) {
-    console.log(`[Twilio Verify Bypass] Master OTP '${config.masterOtp}' accepted.`);
+  if (config.masterOtp && code === config.masterOtp) {
+    console.log('[Twilio Verify Bypass] Master OTP accepted (demo mode).');
     return { success: true, status: 'approved' };
   }
 
