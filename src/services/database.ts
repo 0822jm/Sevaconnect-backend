@@ -82,6 +82,10 @@ export interface User {
   autoAcceptFrom?: string;
   autoAcceptTo?: string;
   trustScore?: number;
+  // True when this user row was returned as a SECONDARY-society maid (their primary
+  // society differs from the one queried); skills/isVerified are then scoped to the
+  // queried society. See getUsersBySociety + maid_societies.
+  secondaryMembership?: boolean;
 }
 
 export interface PricingConfigField {
@@ -649,11 +653,124 @@ export const db = {
           FROM maid_leaves ml
           WHERE ml.maid_id = u.id
           ORDER BY ml.leave_date
-        ) AS leaves
+        ) AS leaves,
+        ms.skills AS ms_skills,
+        ms.is_verified AS ms_is_verified,
+        (ms.id IS NOT NULL AND u.society_id <> ${societyId}) AS secondary_membership
       FROM users u
-      WHERE u.society_id = ${societyId} AND u.role != 'SOCIETY_ADMIN'
+      LEFT JOIN maid_societies ms ON ms.maid_id = u.id AND ms.society_id = ${societyId}
+      WHERE (u.society_id = ${societyId} AND u.role != 'SOCIETY_ADMIN')
+         OR ms.id IS NOT NULL
     `;
-    return rows.map(mapUser);
+    // For maids serving this society as a SECONDARY society, surface that society's
+    // skills + approval status (from maid_societies) instead of their primary ones,
+    // so booking search, the skill filter, and admin approval all operate on the
+    // correct society. Primary members fall through unchanged.
+    return rows.map((r: any) => {
+      const u = mapUser(r);
+      if (r.secondary_membership) {
+        u.skills = r.ms_skills || [];
+        u.isVerified = !!r.ms_is_verified;
+        (u as any).secondaryMembership = true;
+      }
+      return u;
+    });
+  },
+
+  // ─── Multi-society maids (maid_societies) ───
+
+  // All societies a maid serves: their PRIMARY (from users) + SECONDARY (from
+  // maid_societies), each with that society's skills + approval status.
+  getMaidSocieties: async (maidId: string): Promise<Array<{ societyId: string; societyName: string; skills: string[]; isVerified: boolean; isPrimary: boolean }>> => {
+    const rows = await (sql as any)(
+      `SELECT s.id AS society_id, s.name AS society_name, u.skills AS skills, u.is_verified AS is_verified, TRUE AS is_primary
+         FROM users u JOIN societies s ON s.id = u.society_id
+        WHERE u.id = $1 AND u.society_id IS NOT NULL
+       UNION ALL
+       SELECT s.id, s.name, ms.skills, ms.is_verified, FALSE
+         FROM maid_societies ms JOIN societies s ON s.id = ms.society_id
+        WHERE ms.maid_id = $1
+       ORDER BY is_primary DESC, society_name`,
+      [maidId]
+    );
+    return rows.map((r: any) => ({
+      societyId: r.society_id,
+      societyName: r.society_name,
+      skills: r.skills || [],
+      isVerified: !!r.is_verified,
+      isPrimary: !!r.is_primary,
+    }));
+  },
+
+  // Maid requests to serve an ADDITIONAL society (pending until that society's
+  // admin approves). Rejects joining their own primary society; UNIQUE blocks dups.
+  requestMaidSociety: async (maidId: string, societyId: string, skills: string[]): Promise<void> => {
+    const userRows = await sql`SELECT role, society_id FROM users WHERE id = ${maidId}`;
+    if (userRows.length === 0) throw new Error('Maid not found');
+    if (userRows[0].role !== 'MAID') throw new Error('Only maids can join additional societies');
+    if (userRows[0].society_id === societyId) throw new Error('This is already your primary society');
+    await (sql as any)(
+      `INSERT INTO maid_societies (id, maid_id, society_id, skills, is_verified)
+       VALUES ($1, $2, $3, $4, FALSE)
+       ON CONFLICT (maid_id, society_id) DO NOTHING`,
+      [generateId('ms'), maidId, societyId, skills || []]
+    );
+  },
+
+  updateMaidSocietySkills: async (maidId: string, societyId: string, skills: string[]): Promise<void> => {
+    await (sql as any)(
+      `UPDATE maid_societies SET skills = $3 WHERE maid_id = $1 AND society_id = $2`,
+      [maidId, societyId, skills || []]
+    );
+  },
+
+  verifyMaidSociety: async (maidId: string, societyId: string): Promise<void> => {
+    await (sql as any)(
+      `UPDATE maid_societies SET is_verified = TRUE WHERE maid_id = $1 AND society_id = $2`,
+      [maidId, societyId]
+    );
+  },
+
+  leaveMaidSociety: async (maidId: string, societyId: string): Promise<void> => {
+    await (sql as any)(
+      `DELETE FROM maid_societies WHERE maid_id = $1 AND society_id = $2`,
+      [maidId, societyId]
+    );
+  },
+
+  // Skills a maid offers in a given society: their primary skills if it's their
+  // primary society, else the per-society skills from maid_societies.
+  getMaidSkillsForSociety: async (maidId: string, societyId: string): Promise<string[]> => {
+    const userRows = await sql`SELECT skills, society_id FROM users WHERE id = ${maidId}`;
+    if (userRows.length === 0) return [];
+    if (userRows[0].society_id === societyId) return userRows[0].skills || [];
+    const msRows = await (sql as any)(
+      `SELECT skills FROM maid_societies WHERE maid_id = $1 AND society_id = $2`,
+      [maidId, societyId]
+    );
+    return msRows[0]?.skills || [];
+  },
+
+  // Integrity guard for booking/contract/replacement creation: a maid belongs to a
+  // society if it's their primary society, or they have a VERIFIED secondary row.
+  isMaidMemberOfSociety: async (maidId: string, societyId: string): Promise<boolean> => {
+    const userRows = await sql`SELECT society_id FROM users WHERE id = ${maidId}`;
+    if (userRows.length > 0 && userRows[0].society_id === societyId) return true;
+    const msRows = await (sql as any)(
+      `SELECT 1 FROM maid_societies WHERE maid_id = $1 AND society_id = $2 AND is_verified = TRUE`,
+      [maidId, societyId]
+    );
+    return msRows.length > 0;
+  },
+
+  // Push tokens for a society's admin(s) — used to notify on join requests.
+  getSocietyAdminTokens: async (societyId: string): Promise<string[]> => {
+    const rows = await (sql as any)(
+      `SELECT expo_push_token FROM users
+        WHERE society_id = $1 AND role = 'SOCIETY_ADMIN' AND expo_push_token IS NOT NULL`,
+      [societyId]
+    );
+    return rows.map((r: any) => r.expo_push_token).filter(Boolean);
   },
 
   deleteUser: async (id: string): Promise<void> => {
@@ -984,6 +1101,12 @@ export const db = {
            WHERE society_id = $2 AND $1 = ANY(skills)`,
           [id, societyId]
         );
+        // Also strip it from secondary maids who offer it in this society.
+        await (sql as any)(
+          `UPDATE maid_societies SET skills = array_remove(skills, $1)
+           WHERE society_id = $2 AND $1 = ANY(skills)`,
+          [id, societyId]
+        );
       }
     }
     return (await db.getSocietyServiceById(id))!;
@@ -999,6 +1122,12 @@ export const db = {
     if (societyId) {
       await (sql as any)(
         `UPDATE users SET skills = array_remove(skills, $1)
+         WHERE society_id = $2 AND $1 = ANY(skills)`,
+        [id, societyId]
+      );
+      // Also strip it from secondary maids who offer it in this society.
+      await (sql as any)(
+        `UPDATE maid_societies SET skills = array_remove(skills, $1)
          WHERE society_id = $2 AND $1 = ANY(skills)`,
         [id, societyId]
       );
@@ -1944,14 +2073,15 @@ export const db = {
                 END
               , 50)) as trust_score
        FROM users u
-       WHERE u.society_id = $1
+       LEFT JOIN maid_societies ms ON ms.maid_id = u.id AND ms.society_id = $1
+       WHERE (u.society_id = $1 OR ms.id IS NOT NULL)
          AND u.role = 'MAID'
-         AND u.is_verified = true
+         AND COALESCE(ms.is_verified, u.is_verified) = true
          AND ($2::text[] IS NULL OR NOT (u.id = ANY($2::text[])))
          AND (
            $7::text[] IS NULL OR cardinality($7::text[]) = 0
-           OR u.skills IS NULL OR cardinality(u.skills) = 0
-           OR u.skills @> $7::text[]
+           OR COALESCE(ms.skills, u.skills) IS NULL OR cardinality(COALESCE(ms.skills, u.skills)) = 0
+           OR COALESCE(ms.skills, u.skills) @> $7::text[]
          )
          AND NOT EXISTS (
            SELECT 1 FROM bookings b

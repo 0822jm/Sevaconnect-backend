@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
+import { sendPushNotification } from '../services/pushNotifications';
 
 const router = Router();
 router.use(authMiddleware);
@@ -147,6 +148,97 @@ router.post('/:id/leave', async (req: Request, res: Response) => {
     const { date, leaveType } = req.body;
     const leaves = await db.setLeave(req.params.id, date, leaveType);
     res.json({ leaves });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Multi-society maids ───
+
+// GET /api/users/:maidId/societies — all societies the maid serves (primary + secondary)
+router.get('/:maidId/societies', async (req: Request, res: Response) => {
+  try {
+    res.json(await db.getMaidSocieties(req.params.maidId));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/users/:maidId/societies — maid requests to serve an additional society
+// body: { societyId, skills: string[] }
+router.post('/:maidId/societies', async (req: Request, res: Response) => {
+  try {
+    const { societyId, skills } = req.body;
+    if (!societyId) {
+      res.status(400).json({ error: 'societyId is required' });
+      return;
+    }
+    if (skills !== undefined && (!Array.isArray(skills) || skills.some((s: any) => typeof s !== 'string'))) {
+      res.status(400).json({ error: 'skills must be an array of strings' });
+      return;
+    }
+    if (Array.isArray(skills) && skills.length > 0) {
+      const valid = await db.validateSkillIds(societyId, skills);
+      if (!valid) {
+        res.status(400).json({ error: 'Invalid skill ids for this society' });
+        return;
+      }
+    }
+    await db.requestMaidSociety(req.params.maidId, societyId, skills || []);
+    // Notify that society's admin(s) of the pending request.
+    const tokens = await db.getSocietyAdminTokens(societyId);
+    const maid = await db.getUserById(req.params.maidId);
+    for (const token of tokens) {
+      sendPushNotification(token, 'New helper request', `${maid?.name || 'A helper'} has requested to serve your society. Review and approve in Verify Users.`);
+    }
+    res.status(201).json({ success: true });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// PUT /api/users/:maidId/societies/:societyId/skills — update per-society skills
+router.put('/:maidId/societies/:societyId/skills', async (req: Request, res: Response) => {
+  try {
+    const { skills } = req.body;
+    if (!Array.isArray(skills) || skills.some((s: any) => typeof s !== 'string')) {
+      res.status(400).json({ error: 'skills must be an array of strings' });
+      return;
+    }
+    if (skills.length > 0) {
+      const valid = await db.validateSkillIds(req.params.societyId, skills);
+      if (!valid) {
+        res.status(400).json({ error: 'Invalid skill ids for this society' });
+        return;
+      }
+    }
+    await db.updateMaidSocietySkills(req.params.maidId, req.params.societyId, skills);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/users/:maidId/societies/:societyId/verify — society admin approves the maid
+router.post('/:maidId/societies/:societyId/verify', async (req: Request, res: Response) => {
+  try {
+    await db.verifyMaidSociety(req.params.maidId, req.params.societyId);
+    const token = await db.getUserPushToken(req.params.maidId);
+    if (token) {
+      const society = await db.getSocietyById(req.params.societyId);
+      sendPushNotification(token, 'Society approved', `You're now approved to take jobs in ${society?.name || 'a new society'}.`);
+    }
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/users/:maidId/societies/:societyId — maid leaves an additional society
+router.delete('/:maidId/societies/:societyId', async (req: Request, res: Response) => {
+  try {
+    await db.leaveMaidSociety(req.params.maidId, req.params.societyId);
+    res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

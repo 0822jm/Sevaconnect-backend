@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db, BookingStatus, UserRole } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
 import { sendPushNotification } from '../services/pushNotifications';
+import { validateAdhocBookingTimes } from '../utils/bookingValidation';
 
 const router = Router();
 router.use(authMiddleware);
@@ -133,8 +134,10 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
     if (!household.societyId) {
       res.status(400).json({ error: 'Household is not assigned to a society' }); return;
     }
-    if (maid.societyId && maid.societyId !== household.societyId) {
-      res.status(400).json({ error: 'Maid and household belong to different societies' }); return;
+    // Maid must serve the household's society — as their primary society OR an
+    // approved secondary (multi-society) membership.
+    if (!(await db.isMaidMemberOfSociety(maidId, household.societyId))) {
+      res.status(400).json({ error: 'Maid does not serve this society' }); return;
     }
 
     const societyId = household.societyId;
@@ -246,44 +249,33 @@ router.post('/', async (req: Request, res: Response) => {
     // no skills configured yet (graceful — mirrors the mobile filter).
     const bookingType = req.body.bookingType || 'ADHOC';
 
-    // Working-hours validation for ADHOC bookings
+    // Working-hours + future-time validation for ADHOC bookings (see utils/bookingValidation)
     if (bookingType === 'ADHOC') {
-      const { startTime, endTime, workStartDate } = req.body;
-      if (startTime && endTime) {
-        const toMins = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-        const startMins = toMins(startTime);
-        const endMins   = toMins(endTime);
-        if (startMins < toMins('07:00') || startMins > toMins('21:00')) {
-          res.status(400).json({ error: 'Start time must be between 7:00 AM and 9:00 PM' });
-          return;
-        }
-        if (endMins > toMins('22:00')) {
-          res.status(400).json({ error: 'End time cannot be later than 10:00 PM' });
-          return;
-        }
-        if (endMins - startMins < 60) {
-          res.status(400).json({ error: 'Minimum booking duration is 1 hour' });
-          return;
-        }
-      }
-      // Booking must be at least 1 hour in the future (validated in IST, UTC+5:30)
-      if (workStartDate && startTime) {
-        const bookingDateTime = new Date(`${workStartDate}T${startTime}:00+05:30`);
-        const oneHourFromNow  = new Date(Date.now() + 60 * 60 * 1000);
-        if (bookingDateTime < oneHourFromNow) {
-          res.status(400).json({ error: 'Booking must be at least 1 hour in the future' });
-          return;
-        }
+      const timeError = validateAdhocBookingTimes(req.body);
+      if (timeError) {
+        res.status(400).json({ error: timeError });
+        return;
       }
     }
 
     if (bookingType !== 'CONTRACT' && req.body.maidId) {
+      // Resolve the booking's society from the household and enforce that the maid
+      // serves it (primary or approved secondary), then validate skills FOR that society.
+      const household = await db.getUserById(req.body.householdId);
+      const societyId = (household as any)?.societyId;
+      if (!societyId) {
+        res.status(400).json({ error: 'Household is not assigned to a society' });
+        return;
+      }
+      if (!(await db.isMaidMemberOfSociety(req.body.maidId, societyId))) {
+        res.status(400).json({ error: 'Maid does not serve this society' });
+        return;
+      }
       const requiredIds: string[] = Array.isArray(req.body.societyServiceIds) && req.body.societyServiceIds.length
         ? req.body.societyServiceIds
         : (req.body.societyServiceId ? [req.body.societyServiceId] : []);
       if (requiredIds.length > 0) {
-        const maid = await db.getUserById(req.body.maidId);
-        const maidSkills: string[] = (maid as any)?.skills || [];
+        const maidSkills: string[] = await db.getMaidSkillsForSociety(req.body.maidId, societyId);
         if (maidSkills.length > 0) {
           const hasAll = requiredIds.every(id => maidSkills.includes(id));
           if (!hasAll) {
@@ -445,6 +437,13 @@ router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
     const replacementMaid = await db.getUserById(replacementMaidId);
     if (!replacementMaid || replacementMaid.role !== UserRole.MAID) {
       res.status(400).json({ error: 'Invalid replacement maid' });
+      return;
+    }
+    // The replacement maid must serve the booking's society (primary or secondary).
+    const rHousehold = await db.getUserById(booking.householdId);
+    const rSocietyId = (rHousehold as any)?.societyId;
+    if (rSocietyId && !(await db.isMaidMemberOfSociety(replacementMaidId, rSocietyId))) {
+      res.status(400).json({ error: 'Replacement maid does not serve this society' });
       return;
     }
 
