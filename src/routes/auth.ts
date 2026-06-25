@@ -137,7 +137,9 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
       return;
     }
 
-    const result = await startTwilioVerify(phone);
+    // Use the same E.164-formatted number for sending AND checking (see /verify-otp),
+    // otherwise Twilio Verify can't match the code back to this verification.
+    const result = await startTwilioVerify(formatPhoneE164(phone));
     if (result.success) {
       res.json({ success: true, message: 'Verification code sent via SMS' });
     } else {
@@ -158,7 +160,16 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       return;
     }
 
-    const verifyResult = await checkTwilioVerify(username, otp);
+    // The OTP was sent to the user's PHONE (see /forgot-password), so the code must
+    // be checked against that same E.164 phone — NOT the username. Passing the
+    // username here made Twilio look up a verification that never existed, which is
+    // why a correct code was rejected once demo mode was disabled in production.
+    const phone = await db.getUserPhoneByUsername(username);
+    if (!phone) {
+      res.status(404).json({ error: 'No user found' });
+      return;
+    }
+    const verifyResult = await checkTwilioVerify(formatPhoneE164(phone), otp);
     if (!verifyResult.success) {
       res.status(400).json({ error: verifyResult.error || 'Incorrect verification code' });
       return;
