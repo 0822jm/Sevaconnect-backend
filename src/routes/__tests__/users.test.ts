@@ -65,6 +65,37 @@ describe('GET /api/users/:id', () => {
   });
 });
 
+describe('POST /api/users/:id/delete', () => {
+  it('lets the owner delete (anonymise) their own account', async () => {
+    (db.deactivateUser as jest.Mock).mockResolvedValue(undefined);
+    const res = await request(app).post('/api/users/user-1/delete').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(db.deactivateUser).toHaveBeenCalledWith('user-1');
+  });
+
+  it("rejects deleting someone else's account (403)", async () => {
+    const res = await request(app).post('/api/users/u2/delete').set('Authorization', authHeader);
+    expect(res.status).toBe(403);
+    expect(db.deactivateUser).not.toHaveBeenCalled();
+  });
+
+  it('allows a system admin to delete any account', async () => {
+    (db.deactivateUser as jest.Mock).mockResolvedValue(undefined);
+    const sysToken = `Bearer ${generateToken({ userId: 'admin-9', role: 'SYS_ADMIN' })}`;
+    const res = await request(app).post('/api/users/u2/delete').set('Authorization', sysToken);
+    expect(res.status).toBe(200);
+    expect(db.deactivateUser).toHaveBeenCalledWith('u2');
+  });
+
+  it('returns 400 when db throws', async () => {
+    (db.deactivateUser as jest.Mock).mockRejectedValue(new Error('Admin accounts cannot be deleted this way'));
+    const res = await request(app).post('/api/users/user-1/delete').set('Authorization', authHeader);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Admin accounts cannot be deleted this way');
+  });
+});
+
 describe('PUT /api/users/:id', () => {
   it('updates the user and strips password_hash', async () => {
     (db.updateUser as jest.Mock).mockResolvedValue({ id: 'u1', name: 'Alice Updated', password_hash: 'secret' });

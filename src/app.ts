@@ -13,6 +13,7 @@ import bookingRoutes from './routes/bookings';
 import contractUploadRoutes from './routes/contractUploads';
 import messageRoutes from './routes/messages';
 import reviewRoutes from './routes/reviews';
+import legalRoutes from './routes/legal';
 
 // Express app wiring, kept separate from index.ts's app.listen() / cron startup
 // so tests can import `app` and drive it with supertest without binding a port
@@ -26,6 +27,10 @@ app.use(express.json());
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Public legal pages (privacy policy) — served at the root, no /api prefix, no auth,
+// so the App Store / Play Store and the app itself can link to it.
+app.use('/', legalRoutes);
 
 // Routes
 app.use('/api/auth', authRoutes);

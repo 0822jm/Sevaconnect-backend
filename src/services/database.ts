@@ -400,7 +400,7 @@ export const db = {
           END
         , 50)) as trust_score
       FROM users u
-      WHERE u.username = ${username} OR u.phone = ${username}
+      WHERE (u.username = ${username} OR u.phone = ${username}) AND u.deleted_at IS NULL
     `;
     if (rows.length > 0) {
       const user = rows[0];
@@ -444,7 +444,7 @@ export const db = {
   },
 
   verifyForgotPasswordOtp: async (username: string): Promise<User | null> => {
-    const rows = await sql`SELECT * FROM users WHERE username = ${username} OR phone = ${username}`;
+    const rows = await sql`SELECT * FROM users WHERE (username = ${username} OR phone = ${username}) AND deleted_at IS NULL`;
     if (rows.length > 0) {
       const user = rows[0];
       await sql`UPDATE users SET must_change_password = TRUE WHERE id = ${user.id}`;
@@ -454,7 +454,7 @@ export const db = {
   },
 
   getUserPhoneByUsername: async (username: string): Promise<string | null> => {
-    const rows = await sql`SELECT phone FROM users WHERE username = ${username} OR phone = ${username}`;
+    const rows = await sql`SELECT phone FROM users WHERE (username = ${username} OR phone = ${username}) AND deleted_at IS NULL`;
     return rows.length > 0 ? (rows[0].phone || null) : null;
   },
 
@@ -786,6 +786,49 @@ export const db = {
     await sql`DELETE FROM reviews WHERE maid_id = ${id}`;
     await sql`DELETE FROM bookings WHERE household_id = ${id} OR maid_id = ${id}`;
     await sql`DELETE FROM users WHERE id = ${id}`;
+  },
+
+  // Self-service account deletion (App Store Guideline 5.1.1). Instead of a hard
+  // delete, we ANONYMISE: scrub all personal details in place and disable login,
+  // while keeping de-identified booking history so the other party's records and
+  // aggregate stats stay intact. The row becomes a "tombstone" referenced by past
+  // bookings as "Deleted User".
+  deactivateUser: async (id: string): Promise<void> => {
+    const rows = await sql`SELECT role, deleted_at FROM users WHERE id = ${id}`;
+    if (rows.length === 0) throw new Error('User not found');
+    if (rows[0].deleted_at) return; // already deleted — idempotent
+    if (rows[0].role === 'SYS_ADMIN' || rows[0].role === 'SOCIETY_ADMIN') {
+      throw new Error('Admin accounts cannot be deleted this way');
+    }
+
+    // Cancel still-open bookings (the user is leaving the platform).
+    await sql`UPDATE bookings SET status = 'CANCELLED'
+              WHERE (household_id = ${id} OR maid_id = ${id})
+                AND eff_end_date = '3499-12-31'
+                AND status IN ('REQUESTED', 'CONFIRMED', 'IN_PROGRESS')`;
+    // Remove the user's personal content + links (chat text is personal data).
+    await sql`DELETE FROM messages WHERE sender_id = ${id}`;
+    await sql`DELETE FROM maid_societies WHERE maid_id = ${id}`;
+    await sql`DELETE FROM maid_leaves WHERE maid_id = ${id}`;
+    // Scrub PII, disable login, and drop society links (removes them from rosters,
+    // booking search, and stats). Completed bookings + reviews remain, anonymised.
+    await sql`UPDATE users SET
+                name = 'Deleted User',
+                username = ${'deleted-' + id},
+                password_hash = '',
+                phone = NULL,
+                address = NULL,
+                society_id = NULL,
+                expo_push_token = NULL,
+                skills = '{}',
+                is_verified = FALSE,
+                auto_accept = FALSE,
+                auto_accept_from = NULL,
+                auto_accept_to = NULL,
+                must_change_password = FALSE,
+                preferred_maid_id = NULL,
+                deleted_at = now()
+              WHERE id = ${id}`;
   },
 
   // ─── Societies ───

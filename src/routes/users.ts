@@ -244,4 +244,21 @@ router.delete('/:maidId/societies/:societyId', async (req: Request, res: Respons
   }
 });
 
+// POST /api/users/:id/delete — self-service account deletion (anonymise + keep history).
+// Only the account owner (or a system admin) may delete it.
+router.post('/:id/delete', async (req: Request, res: Response) => {
+  try {
+    const requesterId = req.user?.userId;
+    const requesterRole = req.user?.role;
+    if (requesterId !== req.params.id && requesterRole !== 'SYS_ADMIN') {
+      res.status(403).json({ error: 'You can only delete your own account' });
+      return;
+    }
+    await db.deactivateUser(req.params.id);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 export default router;
