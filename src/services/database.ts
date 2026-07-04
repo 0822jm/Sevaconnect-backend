@@ -58,6 +58,7 @@ export enum BookingStatus {
   TERMINATED = 'TERMINATED',
   NO_SHOW = 'NO_SHOW',        // confirmed but never started; date passed
   INCOMPLETE = 'INCOMPLETE',  // started (start OTP) but no end OTP; date passed
+  EXPIRED = 'EXPIRED',        // adhoc request no maid ever accepted; date passed
 }
 
 export type BookingType = 'ADHOC' | 'CONTRACT' | 'REPLACEMENT';
@@ -1257,10 +1258,19 @@ export const db = {
   },
 
   // Sweep stale ADHOC bookings whose scheduled day has fully passed (IST):
+  //   REQUESTED (never accepted)      -> EXPIRED
   //   CONFIRMED + no start OTP        -> NO_SHOW
   //   IN_PROGRESS (started, no end)   -> INCOMPLETE
   // Idempotent: only touches current rows in those exact states. Safe to run repeatedly.
-  sweepStaleBookings: async (): Promise<{ noShow: number; incomplete: number }> => {
+  sweepStaleBookings: async (): Promise<{ expired: number; noShow: number; incomplete: number }> => {
+    const expired = await (sql as any)(
+      `UPDATE bookings SET status = 'EXPIRED'
+       WHERE eff_end_date = '3499-12-31'
+         AND booking_type = 'ADHOC'
+         AND status = 'REQUESTED'
+         AND work_start_date < (now() AT TIME ZONE 'Asia/Kolkata')::date
+       RETURNING id`,
+    );
     const noShow = await (sql as any)(
       `UPDATE bookings SET status = 'NO_SHOW'
        WHERE eff_end_date = '3499-12-31'
@@ -1279,7 +1289,7 @@ export const db = {
          AND work_start_date < (now() AT TIME ZONE 'Asia/Kolkata')::date
        RETURNING id`,
     );
-    return { noShow: noShow.length, incomplete: incomplete.length };
+    return { expired: expired.length, noShow: noShow.length, incomplete: incomplete.length };
   },
 
   // Throttled wrapper for the lazy on-fetch fallback: runs the sweep at most once/hour.

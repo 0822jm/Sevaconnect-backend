@@ -8,18 +8,18 @@ app.listen(PORT, () => {
   console.log(`[Kamon Backend] Running on http://localhost:${PORT}`);
   console.log(`[Kamon Backend] Health check: http://localhost:${PORT}/api/health`);
 
-  // Stale-booking sweep: NO_SHOW / INCOMPLETE for ADHOC bookings whose day has passed.
+  // Stale-booking sweep: EXPIRED / NO_SHOW / INCOMPLETE for ADHOC bookings whose day has passed.
   // Primary trigger = daily cron at 00:30 IST; on free-tier the service may be asleep, so the
   // lazy on-fetch fallback (db.maybeSweepStaleBookings in booking-list routes) is the real safety net.
   db.sweepStaleBookings()
-    .then((r) => console.log(`[sweepStaleBookings] startup: ${r.noShow} no-show, ${r.incomplete} incomplete`))
+    .then((r) => console.log(`[sweepStaleBookings] startup: ${r.expired} expired, ${r.noShow} no-show, ${r.incomplete} incomplete`))
     .catch((e) => console.error('[sweepStaleBookings] startup failed', e));
 
   cron.schedule(
     '30 0 * * *',
     () => {
       db.sweepStaleBookings()
-        .then((r) => console.log(`[sweepStaleBookings] cron: ${r.noShow} no-show, ${r.incomplete} incomplete`))
+        .then((r) => console.log(`[sweepStaleBookings] cron: ${r.expired} expired, ${r.noShow} no-show, ${r.incomplete} incomplete`))
         .catch((e) => console.error('[sweepStaleBookings] cron failed', e));
     },
     { timezone: 'Asia/Kolkata' },
