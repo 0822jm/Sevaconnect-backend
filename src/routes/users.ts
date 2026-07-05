@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
-import { sendPushNotification } from '../services/pushNotifications';
+import { sendLocalizedNotification } from '../services/pushNotifications';
+import { SUPPORTED_LOCALES } from '../i18n/notifications';
 
 const router = Router();
 router.use(authMiddleware);
@@ -35,6 +36,10 @@ router.get('/:id', async (req: Request, res: Response) => {
 // PUT /api/users/:id
 router.put('/:id', async (req: Request, res: Response) => {
   try {
+    if (req.body.preferredLocale !== undefined && req.body.preferredLocale !== null && !SUPPORTED_LOCALES.includes(req.body.preferredLocale)) {
+      res.status(400).json({ error: `preferredLocale must be one of: ${SUPPORTED_LOCALES.join(', ')}` });
+      return;
+    }
     const updated = await db.updateUser(req.params.id, req.body);
     const { password_hash, ...safeUser } = updated as any;
     res.json(safeUser);
@@ -185,11 +190,18 @@ router.post('/:maidId/societies', async (req: Request, res: Response) => {
       }
     }
     await db.requestMaidSociety(req.params.maidId, societyId, skills || []);
-    // Notify that society's admin(s) of the pending request.
-    const tokens = await db.getSocietyAdminTokens(societyId);
+    // Notify that society's admin(s) of the pending request — each in their own locale, since
+    // different admins of the same society may have different language preferences.
+    const admins = await db.getSocietyAdminTokens(societyId);
     const maid = await db.getUserById(req.params.maidId);
-    for (const token of tokens) {
-      sendPushNotification(token, 'New helper request', `${maid?.name || 'A helper'} has requested to serve your society. Review and approve in Verify Users.`);
+    for (const admin of admins) {
+      sendLocalizedNotification(
+        admin.pushToken,
+        admin.preferredLocale,
+        'society.joinRequested',
+        { maidName: maid?.name || 'A helper' },
+        { type: 'society', id: societyId },
+      );
     }
     res.status(201).json({ success: true });
   } catch (e: any) {
@@ -223,10 +235,16 @@ router.put('/:maidId/societies/:societyId/skills', async (req: Request, res: Res
 router.post('/:maidId/societies/:societyId/verify', async (req: Request, res: Response) => {
   try {
     await db.verifyMaidSociety(req.params.maidId, req.params.societyId);
-    const token = await db.getUserPushToken(req.params.maidId);
-    if (token) {
+    const maidInfo = await db.getUserPushInfo(req.params.maidId);
+    if (maidInfo?.pushToken) {
       const society = await db.getSocietyById(req.params.societyId);
-      sendPushNotification(token, 'Society approved', `You're now approved to take jobs in ${society?.name || 'a new society'}.`);
+      sendLocalizedNotification(
+        maidInfo.pushToken,
+        maidInfo.preferredLocale,
+        'society.joinApproved',
+        { societyName: society?.name || 'a new society' },
+        { type: 'society', id: req.params.societyId },
+      );
     }
     res.json({ success: true });
   } catch (e: any) {

@@ -2,7 +2,7 @@ import request from 'supertest';
 import { app } from '../../app';
 import { db, BookingStatus, UserRole } from '../../services/database';
 import { generateToken } from '../../middleware/auth';
-import { sendPushNotification } from '../../services/pushNotifications';
+import { sendLocalizedNotification } from '../../services/pushNotifications';
 
 jest.mock('../../services/database');
 jest.mock('../../services/pushNotifications');
@@ -74,6 +74,7 @@ describe('POST /api/bookings/contract-leave-exception', () => {
     (db.createLeaveExceptionBooking as jest.Mock).mockResolvedValue({ id: 'rep-1' });
     (db.getNotificationInfoForBooking as jest.Mock).mockResolvedValue({
       householdPushToken: 'push-1',
+      householdPreferredLocale: 'en',
       maidName: 'Maid A',
       serviceName: 'Cleaning',
     });
@@ -86,10 +87,12 @@ describe('POST /api/bookings/contract-leave-exception', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, replacementId: 'rep-1' });
     expect(db.createLeaveExceptionBooking).toHaveBeenCalledWith('c1', '2099-01-01');
-    expect(sendPushNotification).toHaveBeenCalledWith(
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
       'push-1',
-      'Contract – Replacement Needed',
-      expect.stringContaining('Maid A'),
+      'en',
+      'contract.replacementNeededLeave',
+      expect.objectContaining({ maidName: 'Maid A' }),
+      { type: 'contract', id: 'c1' },
     );
   });
 
@@ -103,7 +106,7 @@ describe('POST /api/bookings/contract-leave-exception', () => {
       .send({ contractId: 'c1', date: '2099-01-01' });
 
     expect(res.status).toBe(200);
-    expect(sendPushNotification).not.toHaveBeenCalled();
+    expect(sendLocalizedNotification).not.toHaveBeenCalled();
   });
 
   it('returns 500 when db throws', async () => {
@@ -302,10 +305,12 @@ describe('POST /api/bookings/contracts/create', () => {
         priceAtBooking: 5000,
       }),
     );
-    expect(sendPushNotification).toHaveBeenCalledWith(
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
       'push-maid',
-      'New Contract',
-      expect.stringContaining('House A'),
+      undefined,
+      'contract.createdMaid',
+      expect.objectContaining({ householdName: 'House A', startDate: '2099-01-01' }),
+      { type: 'contract', id: 'booking-contract-1' },
     );
   });
 
@@ -447,6 +452,7 @@ describe('DELETE /api/bookings/contracts/:contractId', () => {
     (db.getBookingById as jest.Mock).mockResolvedValue({ id: 'c1', stagingContractId: 'sc-1' });
     (db.getNotificationInfoForBooking as jest.Mock).mockResolvedValue({
       householdPushToken: 'push-house',
+      householdPreferredLocale: 'en',
       maidName: 'Maid A',
     });
     (db.terminateContract as jest.Mock).mockResolvedValue(undefined);
@@ -458,10 +464,12 @@ describe('DELETE /api/bookings/contracts/:contractId', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true });
     expect(db.terminateContract).toHaveBeenCalledWith('c1');
-    expect(sendPushNotification).toHaveBeenCalledWith(
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
       'push-house',
-      'Contract Terminated',
-      expect.stringContaining('Maid A'),
+      'en',
+      'contract.terminatedByMaid',
+      { maidName: 'Maid A' },
+      { type: 'contract', id: 'c1' },
     );
   });
 
@@ -469,6 +477,7 @@ describe('DELETE /api/bookings/contracts/:contractId', () => {
     (db.getBookingById as jest.Mock).mockResolvedValue({ id: 'c1', stagingContractId: 'sc-1' });
     (db.getMaidInfoForContract as jest.Mock).mockResolvedValue({
       maidPushToken: 'push-maid',
+      maidPreferredLocale: 'en',
       householdName: 'House A',
     });
     (db.terminateContract as jest.Mock).mockResolvedValue(undefined);
@@ -479,10 +488,12 @@ describe('DELETE /api/bookings/contracts/:contractId', () => {
 
     expect(res.status).toBe(200);
     expect(db.terminateContract).toHaveBeenCalledWith('c1');
-    expect(sendPushNotification).toHaveBeenCalledWith(
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
       'push-maid',
-      'Contract Terminated',
-      expect.stringContaining('House A'),
+      'en',
+      'contract.terminatedByHousehold',
+      { householdName: 'House A' },
+      { type: 'contract', id: 'c1' },
     );
   });
 

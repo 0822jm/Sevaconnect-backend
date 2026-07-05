@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db, BookingStatus, UserRole } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
-import { sendPushNotification } from '../services/pushNotifications';
+import { sendLocalizedNotification } from '../services/pushNotifications';
 import { validateAdhocBookingTimes } from '../utils/bookingValidation';
 
 const router = Router();
@@ -64,10 +64,12 @@ router.post('/contract-leave-exception', async (req: Request, res: Response) => 
         leaveType === 'FULL'      ? 'the full day' :
         leaveType === 'MORNING'   ? 'the morning (8 AM – 12 PM)' :
                                     'the afternoon (12 PM onwards)';
-      sendPushNotification(
+      sendLocalizedNotification(
         info.householdPushToken,
-        'Contract – Replacement Needed',
-        `${info.maidName} is unavailable on ${date} for ${leaveDesc}. Please arrange a replacement helper.`,
+        info.householdPreferredLocale,
+        'contract.replacementNeededLeave',
+        { maidName: info.maidName, date, leaveDesc },
+        { type: 'contract', id: contractId },
       );
     }
 
@@ -200,10 +202,22 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
 
     // Notify maid
     if ((maid as any).expo_push_token) {
-      sendPushNotification(
+      sendLocalizedNotification(
         (maid as any).expo_push_token,
-        'New Contract',
-        `${household.name || 'A household'} has created a contract with you starting ${startDate}`,
+        (maid as any).preferredLocale,
+        'contract.createdMaid',
+        { householdName: household.name || 'A household', startDate },
+        { type: 'contract', id: bk.id },
+      );
+    }
+    // Notify household — confirmation their own contract creation succeeded
+    if ((household as any).expo_push_token) {
+      sendLocalizedNotification(
+        (household as any).expo_push_token,
+        (household as any).preferredLocale,
+        'contract.createdHousehold',
+        { maidName: maid.name || 'Maid', startDate },
+        { type: 'contract', id: bk.id },
       );
     }
 
@@ -287,15 +301,41 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     const booking = await db.createBooking(req.body);
-    // Notify maid when booking requires their manual acceptance
-    if (booking.status === BookingStatus.REQUESTED && req.body.maidId) {
-      const maidToken = await db.getUserPushToken(req.body.maidId);
-      if (maidToken) {
-        sendPushNotification(
-          maidToken,
-          'New Booking Request',
-          `You have a new booking request for ${booking.workStartDate} at ${booking.startTime}. Tap to review.`
-        );
+    if (req.body.maidId) {
+      const info = await db.getNotificationInfoForBooking(booking.id);
+      // Notify maid when the booking still requires their manual acceptance
+      if (booking.status === BookingStatus.REQUESTED) {
+        const maidInfo = await db.getUserPushInfo(req.body.maidId);
+        if (maidInfo?.pushToken) {
+          sendLocalizedNotification(
+            maidInfo.pushToken,
+            maidInfo.preferredLocale,
+            'booking.newRequest',
+            { householdName: info?.householdName || 'A household', date: booking.workStartDate, time: booking.startTime },
+            { type: 'booking_request', id: booking.id },
+          );
+        }
+      }
+      // Notify household — either an auto-accept confirmation or a "request sent" confirmation,
+      // distinguishing the two per the auto-accept requirement.
+      if (info?.householdPushToken) {
+        if ((booking as any).autoAccepted) {
+          sendLocalizedNotification(
+            info.householdPushToken,
+            info.householdPreferredLocale,
+            'booking.requestSentAutoAccept',
+            { maidName: info.maidName, date: booking.workStartDate, time: booking.startTime },
+            { type: 'booking', id: booking.id },
+          );
+        } else if (booking.status === BookingStatus.REQUESTED) {
+          sendLocalizedNotification(
+            info.householdPushToken,
+            info.householdPreferredLocale,
+            'booking.requestSentPendingApproval',
+            { date: booking.workStartDate, time: booking.startTime, maidName: info.maidName },
+            { type: 'booking', id: booking.id },
+          );
+        }
       }
     }
     res.status(201).json(booking);
@@ -332,10 +372,12 @@ router.put('/contracts/:contractId', async (req: Request, res: Response) => {
           const changes: string[] = [`Time: ${startTime}–${endTime}`];
           if (startDate) changes.push(`Start date: ${startDate}`);
           if (monthlyFee !== undefined) changes.push(`Fee: ₹${Math.round(Number(monthlyFee))}`);
-          sendPushNotification(
+          sendLocalizedNotification(
             info.maidPushToken,
-            'Contract Updated',
-            `${info.householdName} has updated your contract. ${changes.join(', ')}.`,
+            info.maidPreferredLocale,
+            'contract.updated',
+            { householdName: info.householdName, changes: changes.join(', ') },
+            { type: 'contract', id: booking.id },
           );
         }
       }).catch(() => {});
@@ -361,10 +403,12 @@ router.delete('/contracts/:contractId', async (req: Request, res: Response) => {
       const info = await db.getNotificationInfoForBooking(req.params.contractId);
       await db.terminateContract(req.params.contractId);
       if (info?.householdPushToken) {
-        sendPushNotification(
+        sendLocalizedNotification(
           info.householdPushToken,
-          'Contract Terminated',
-          `Your contract with ${info.maidName} has been terminated by the maid.`,
+          info.householdPreferredLocale,
+          'contract.terminatedByMaid',
+          { maidName: info.maidName },
+          { type: 'contract', id: req.params.contractId },
         );
       }
     } else {
@@ -373,10 +417,12 @@ router.delete('/contracts/:contractId', async (req: Request, res: Response) => {
         : null;
       await db.terminateContract(req.params.contractId);
       if (info?.maidPushToken) {
-        sendPushNotification(
+        sendLocalizedNotification(
           info.maidPushToken,
-          'Contract Terminated',
-          `Your contract with ${info.householdName} has been terminated.`,
+          info.maidPreferredLocale,
+          'contract.terminatedByHousehold',
+          { householdName: info.householdName },
+          { type: 'contract', id: req.params.contractId },
         );
       }
     }
@@ -455,10 +501,12 @@ router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
       const dateLabel = new Date(booking.workStartDate + 'T00:00').toLocaleDateString('en-IN', {
         weekday: 'short', day: 'numeric', month: 'short',
       });
-      sendPushNotification(
+      sendLocalizedNotification(
         pushToken,
-        result.bookingType === 'REPLACEMENT' ? 'Contract Session Assigned' : 'New Booking Assigned',
-        `You have been assigned as a replacement helper on ${dateLabel} at ${booking.startTime}.`,
+        replacementMaid.preferredLocale,
+        result.bookingType === 'REPLACEMENT' ? 'booking.replacementAssignedContract' : 'booking.replacementAssignedAdhoc',
+        { date: dateLabel, time: booking.startTime },
+        { type: 'booking', id: result.newBookingId },
       );
     }
 
@@ -521,10 +569,12 @@ router.put('/:id/status', async (req: Request, res: Response) => {
         // Notify household
         const info = await db.getNotificationInfoForBooking(replacement?.id || booking.id);
         if (info?.householdPushToken) {
-          sendPushNotification(
+          sendLocalizedNotification(
             info.householdPushToken,
-            'Contract – Replacement Needed',
-            `${info.maidName} cancelled the session on ${date}. Please arrange a replacement.`,
+            info.householdPreferredLocale,
+            'contract.replacementNeededCancel',
+            { maidName: info.maidName, date },
+            { type: 'contract', id: booking.id },
           );
         }
         res.json({ success: true, replacementId: replacement?.id });
@@ -532,20 +582,47 @@ router.put('/:id/status', async (req: Request, res: Response) => {
       }
       // Adhoc or Replacement cancellation — status in-place, record stays open
       const cancelledBy = (req.body.cancelledBy as string) || 'MAID';
+      const preUpdateStatus = booking.status; // capture before the mutation below
       await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED, cancelledBy);
 
-      // Only notify household when the maid cancelled (not when household self-cancels)
-      if (cancelledBy !== 'HOUSEHOLD') {
+      if (cancelledBy === 'HOUSEHOLD') {
+        // Notify the maid — previously skipped entirely.
+        const info = await db.getMaidNotificationInfoForBooking(req.params.id);
+        if (info?.maidPushToken) {
+          sendLocalizedNotification(
+            info.maidPushToken,
+            info.maidPreferredLocale,
+            'booking.cancelledByHousehold',
+            { householdName: info.householdName, date: booking.workStartDate, time: booking.startTime },
+            { type: 'booking', id: req.params.id },
+          );
+        }
+      } else {
+        // Maid acted: a still-REQUESTED booking being cancelled is a decline (nothing was ever
+        // confirmed); a CONFIRMED booking being cancelled is a genuine cancellation. Distinguish
+        // using the pre-update status rather than reusing the same wording for both.
         const info = await db.getNotificationInfoForBooking(req.params.id);
         if (info?.householdPushToken) {
           const dateLabel = new Date(booking.workStartDate + 'T00:00').toLocaleDateString('en-IN', {
             weekday: 'short', day: 'numeric', month: 'short',
           });
-          sendPushNotification(
-            info.householdPushToken,
-            'Booking Cancelled – Replacement Needed',
-            `${info.maidName} cancelled ${info.serviceName} on ${dateLabel}. Please arrange a replacement helper.`,
-          );
+          if (preUpdateStatus === BookingStatus.REQUESTED) {
+            sendLocalizedNotification(
+              info.householdPushToken,
+              info.householdPreferredLocale,
+              'booking.declinedByMaid',
+              { maidName: info.maidName, date: dateLabel },
+              { type: 'booking', id: req.params.id },
+            );
+          } else {
+            sendLocalizedNotification(
+              info.householdPushToken,
+              info.householdPreferredLocale,
+              'booking.cancelledByMaid',
+              { maidName: info.maidName, serviceName: info.serviceName, date: dateLabel },
+              { type: 'booking', id: req.params.id },
+            );
+          }
         }
       }
       res.json({ success: true });
@@ -567,14 +644,18 @@ router.put('/:id/status', async (req: Request, res: Response) => {
     // All other status changes — in-place update
     await db.updateBookingStatus(req.params.id, status as BookingStatus);
 
-    // Notify household when maid accepts an ADHOC booking
+    // Notify household when maid manually accepts an ADHOC booking (auto-accept never reaches
+    // this route — it resolves synchronously inside createBooking — so this is always a manual
+    // accept, no auto/manual branching needed here).
     if (status === BookingStatus.CONFIRMED && booking.bookingType === 'ADHOC') {
       const info = await db.getNotificationInfoForBooking(req.params.id);
       if (info?.householdPushToken) {
-        sendPushNotification(
+        sendLocalizedNotification(
           info.householdPushToken,
-          'Booking Confirmed',
-          `${info.maidName} has accepted your ${info.serviceName} booking. See you on ${booking.workStartDate}!`
+          info.householdPreferredLocale,
+          'booking.confirmedManual',
+          { maidName: info.maidName, serviceName: info.serviceName, date: booking.workStartDate },
+          { type: 'booking', id: req.params.id },
         );
       }
     }

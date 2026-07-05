@@ -2,7 +2,7 @@ import request from 'supertest';
 import { app } from '../../app';
 import { db, BookingStatus, UserRole } from '../../services/database';
 import { generateToken } from '../../middleware/auth';
-import { sendPushNotification } from '../../services/pushNotifications';
+import { sendLocalizedNotification } from '../../services/pushNotifications';
 
 jest.mock('../../services/database');
 jest.mock('../../services/pushNotifications');
@@ -159,10 +159,12 @@ describe('PUT /api/bookings/:id/assign-replacement', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, newBookingId: 'b2' });
     expect(db.assignReplacementForBooking).toHaveBeenCalledWith('b1', 'maid-2');
-    expect(sendPushNotification).toHaveBeenCalledWith(
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
       'push-2',
-      'New Booking Assigned',
-      expect.stringContaining('assigned'),
+      undefined,
+      'booking.replacementAssignedAdhoc',
+      expect.any(Object),
+      { type: 'booking', id: 'b2' },
     );
   });
 
@@ -277,8 +279,9 @@ describe('PUT /api/bookings/:id/status', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ success: true, replacementId: 'rep-1' });
       expect(db.createLeaveExceptionBooking).toHaveBeenCalledWith('b1', '2099-01-05');
-      expect(sendPushNotification).toHaveBeenCalledWith(
-        'push-house', 'Contract – Replacement Needed', expect.stringContaining('Maid A'),
+      expect(sendLocalizedNotification).toHaveBeenCalledWith(
+        'push-house', undefined, 'contract.replacementNeededCancel',
+        { maidName: 'Maid A', date: '2099-01-05' }, { type: 'contract', id: 'b1' },
       );
     });
 
@@ -299,16 +302,43 @@ describe('PUT /api/bookings/:id/status', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ success: true });
       expect(db.updateBookingStatus).toHaveBeenCalledWith('b1', BookingStatus.CANCELLED, 'MAID');
-      expect(sendPushNotification).toHaveBeenCalledWith(
-        'push-house', 'Booking Cancelled – Replacement Needed', expect.stringContaining('Maid A'),
+      expect(sendLocalizedNotification).toHaveBeenCalledWith(
+        'push-house', undefined, 'booking.cancelledByMaid',
+        expect.objectContaining({ maidName: 'Maid A', serviceName: 'Cleaning' }),
+        { type: 'booking', id: 'b1' },
       );
     });
 
-    it('does not notify household when household self-cancels', async () => {
+    it('declines (not cancels) when the maid cancels a still-REQUESTED booking', async () => {
       (db.getBookingById as jest.Mock).mockResolvedValue({
-        id: 'b1', bookingType: 'ADHOC', workStartDate: '2099-01-01',
+        id: 'b1', bookingType: 'ADHOC', workStartDate: '2099-01-01', status: BookingStatus.REQUESTED,
       });
       (db.updateBookingStatus as jest.Mock).mockResolvedValue(undefined);
+      (db.getNotificationInfoForBooking as jest.Mock).mockResolvedValue({
+        householdPushToken: 'push-house', maidName: 'Maid A', serviceName: 'Cleaning',
+      });
+
+      const res = await request(app)
+        .put('/api/bookings/b1/status')
+        .set('Authorization', authHeader)
+        .send({ status: BookingStatus.CANCELLED, cancelledBy: 'MAID' });
+
+      expect(res.status).toBe(200);
+      expect(sendLocalizedNotification).toHaveBeenCalledWith(
+        'push-house', undefined, 'booking.declinedByMaid',
+        expect.objectContaining({ maidName: 'Maid A' }),
+        { type: 'booking', id: 'b1' },
+      );
+    });
+
+    it('notifies the maid (not household) when household self-cancels', async () => {
+      (db.getBookingById as jest.Mock).mockResolvedValue({
+        id: 'b1', bookingType: 'ADHOC', workStartDate: '2099-01-01', startTime: '10:00',
+      });
+      (db.updateBookingStatus as jest.Mock).mockResolvedValue(undefined);
+      (db.getMaidNotificationInfoForBooking as jest.Mock).mockResolvedValue({
+        maidPushToken: 'push-maid', maidPreferredLocale: 'en', householdName: 'House A',
+      });
 
       const res = await request(app)
         .put('/api/bookings/b1/status')
@@ -318,7 +348,11 @@ describe('PUT /api/bookings/:id/status', () => {
       expect(res.status).toBe(200);
       expect(db.updateBookingStatus).toHaveBeenCalledWith('b1', BookingStatus.CANCELLED, 'HOUSEHOLD');
       expect(db.getNotificationInfoForBooking).not.toHaveBeenCalled();
-      expect(sendPushNotification).not.toHaveBeenCalled();
+      expect(sendLocalizedNotification).toHaveBeenCalledWith(
+        'push-maid', 'en', 'booking.cancelledByHousehold',
+        expect.objectContaining({ householdName: 'House A' }),
+        { type: 'booking', id: 'b1' },
+      );
     });
 
     it('defaults cancelledBy to MAID when not provided', async () => {
@@ -387,8 +421,10 @@ describe('PUT /api/bookings/:id/status', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ success: true });
       expect(db.updateBookingStatus).toHaveBeenCalledWith('b1', BookingStatus.CONFIRMED);
-      expect(sendPushNotification).toHaveBeenCalledWith(
-        'push-house', 'Booking Confirmed', expect.stringContaining('Maid A'),
+      expect(sendLocalizedNotification).toHaveBeenCalledWith(
+        'push-house', undefined, 'booking.confirmedManual',
+        expect.objectContaining({ maidName: 'Maid A', serviceName: 'Cleaning' }),
+        { type: 'booking', id: 'b1' },
       );
     });
 
@@ -405,7 +441,7 @@ describe('PUT /api/bookings/:id/status', () => {
 
       expect(res.status).toBe(200);
       expect(db.getNotificationInfoForBooking).not.toHaveBeenCalled();
-      expect(sendPushNotification).not.toHaveBeenCalled();
+      expect(sendLocalizedNotification).not.toHaveBeenCalled();
     });
   });
 

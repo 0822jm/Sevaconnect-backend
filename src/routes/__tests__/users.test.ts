@@ -2,8 +2,10 @@ import request from 'supertest';
 import { app } from '../../app';
 import { db } from '../../services/database';
 import { generateToken } from '../../middleware/auth';
+import { sendLocalizedNotification } from '../../services/pushNotifications';
 
 jest.mock('../../services/database');
+jest.mock('../../services/pushNotifications');
 
 const token = generateToken({ userId: 'user-1', role: 'admin' });
 const authHeader = `Bearer ${token}`;
@@ -330,7 +332,10 @@ describe('POST /api/users/:maidId/societies', () => {
   it('requests an additional society with skills and notifies admins', async () => {
     (db.validateSkillIds as jest.Mock).mockResolvedValue(true);
     (db.requestMaidSociety as jest.Mock).mockResolvedValue(undefined);
-    (db.getSocietyAdminTokens as jest.Mock).mockResolvedValue([]);
+    (db.getSocietyAdminTokens as jest.Mock).mockResolvedValue([
+      { pushToken: 'push-admin-1', preferredLocale: 'hi' },
+      { pushToken: 'push-admin-2', preferredLocale: null },
+    ]);
     (db.getUserById as jest.Mock).mockResolvedValue({ id: 'maid-1', name: 'Maid One' });
     const res = await request(app)
       .post('/api/users/maid-1/societies')
@@ -339,6 +344,15 @@ describe('POST /api/users/:maidId/societies', () => {
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ success: true });
     expect(db.requestMaidSociety).toHaveBeenCalledWith('maid-1', 'soc-2', ['cleaning']);
+    // Each admin is notified in their own locale.
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
+      'push-admin-1', 'hi', 'society.joinRequested',
+      { maidName: 'Maid One' }, { type: 'society', id: 'soc-2' },
+    );
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
+      'push-admin-2', null, 'society.joinRequested',
+      { maidName: 'Maid One' }, { type: 'society', id: 'soc-2' },
+    );
   });
 
   it('requests an additional society with no skills provided', async () => {

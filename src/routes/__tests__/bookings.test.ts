@@ -2,8 +2,10 @@ import request from 'supertest';
 import { app } from '../../app';
 import { db, BookingStatus, UserRole } from '../../services/database';
 import { generateToken } from '../../middleware/auth';
+import { sendLocalizedNotification } from '../../services/pushNotifications';
 
 jest.mock('../../services/database');
+jest.mock('../../services/pushNotifications');
 
 const authHeader = `Bearer ${generateToken({ userId: 'household-1', role: 'HOUSEHOLD' })}`;
 
@@ -64,7 +66,7 @@ describe('POST /api/bookings', () => {
       workStartDate: '2099-01-01',
       startTime: '10:00',
     });
-    (db.getUserPushToken as jest.Mock).mockResolvedValue('push-token-abc');
+    (db.getUserPushInfo as jest.Mock).mockResolvedValue({ pushToken: 'push-token-abc', preferredLocale: 'en' });
 
     const res = await request(app)
       .post('/api/bookings')
@@ -72,7 +74,70 @@ describe('POST /api/bookings', () => {
       .send(validBody);
 
     expect(res.status).toBe(201);
-    expect(db.getUserPushToken).toHaveBeenCalledWith('maid-1');
+    expect(db.getUserPushInfo).toHaveBeenCalledWith('maid-1');
+  });
+
+  it('notifies the household with an auto-accept message when the booking is auto-accepted', async () => {
+    (db.getUserById as jest.Mock).mockResolvedValue({ id: 'household-1', societyId: 'society-1' });
+    (db.isMaidMemberOfSociety as jest.Mock).mockResolvedValue(true);
+    (db.getMaidSkillsForSociety as jest.Mock).mockResolvedValue([]);
+    (db.createBooking as jest.Mock).mockResolvedValue({
+      id: 'booking-3',
+      status: BookingStatus.CONFIRMED,
+      autoAccepted: true,
+      workStartDate: '2099-01-01',
+      startTime: '10:00',
+    });
+    (db.getNotificationInfoForBooking as jest.Mock).mockResolvedValue({
+      householdPushToken: 'push-house', householdPreferredLocale: 'en', maidName: 'Maid A',
+    });
+
+    const res = await request(app)
+      .post('/api/bookings')
+      .set('Authorization', authHeader)
+      .send(validBody);
+
+    expect(res.status).toBe(201);
+    // No manual-acceptance push to the maid — the booking never stayed REQUESTED.
+    expect(db.getUserPushInfo).not.toHaveBeenCalled();
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
+      'push-house', 'en', 'booking.requestSentAutoAccept',
+      expect.objectContaining({ maidName: 'Maid A' }),
+      { type: 'booking', id: 'booking-3' },
+    );
+  });
+
+  it('notifies the household with a pending-approval message when the booking still needs manual acceptance', async () => {
+    (db.getUserById as jest.Mock).mockResolvedValue({ id: 'household-1', societyId: 'society-1' });
+    (db.isMaidMemberOfSociety as jest.Mock).mockResolvedValue(true);
+    (db.getMaidSkillsForSociety as jest.Mock).mockResolvedValue([]);
+    (db.createBooking as jest.Mock).mockResolvedValue({
+      id: 'booking-4',
+      status: BookingStatus.REQUESTED,
+      workStartDate: '2099-01-01',
+      startTime: '10:00',
+    });
+    (db.getUserPushInfo as jest.Mock).mockResolvedValue({ pushToken: 'push-maid', preferredLocale: null });
+    (db.getNotificationInfoForBooking as jest.Mock).mockResolvedValue({
+      householdPushToken: 'push-house', householdPreferredLocale: 'gu', householdName: 'House A', maidName: 'Maid A',
+    });
+
+    const res = await request(app)
+      .post('/api/bookings')
+      .set('Authorization', authHeader)
+      .send(validBody);
+
+    expect(res.status).toBe(201);
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
+      'push-maid', null, 'booking.newRequest',
+      expect.objectContaining({ householdName: 'House A' }),
+      { type: 'booking_request', id: 'booking-4' },
+    );
+    expect(sendLocalizedNotification).toHaveBeenCalledWith(
+      'push-house', 'gu', 'booking.requestSentPendingApproval',
+      expect.objectContaining({ maidName: 'Maid A' }),
+      { type: 'booking', id: 'booking-4' },
+    );
   });
 
   it('returns 400 when start time is outside the 7am-9pm working window', async () => {

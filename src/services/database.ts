@@ -87,6 +87,9 @@ export interface User {
   // society differs from the one queried); skills/isVerified are then scoped to the
   // queried society. See getUsersBySociety + maid_societies.
   secondaryMembership?: boolean;
+  // User's chosen app language, synced from the mobile client. Undefined for legacy/never-synced
+  // users — resolved to English at the notification i18n lookup layer, not here.
+  preferredLocale?: string;
 }
 
 export interface PricingConfigField {
@@ -281,6 +284,7 @@ const mapUser = (row: any): User => ({
   autoAcceptTo: row.auto_accept_to ? String(row.auto_accept_to).substring(0, 5) : undefined,
   trustScore: row.trust_score != null ? Number(row.trust_score) : null,
   preferredMaidId: row.preferred_maid_id || null,
+  preferredLocale: row.preferred_locale || undefined,
 });
 
 const mapService = (row: any): Service => ({
@@ -534,8 +538,8 @@ export const db = {
 
     const id = generateId('u');
     const passwordHash = user.password ? await hashPassword(user.password) : '';
-    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password, auto_accept, auto_accept_from, auto_accept_to)
-       VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${phone}, ${user.address || null}, ${user.skills || []}, FALSE, ${user.autoAccept || false}, ${user.autoAcceptFrom || null}, ${user.autoAcceptTo || null})`;
+    await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password, auto_accept, auto_accept_from, auto_accept_to, preferred_locale)
+       VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${phone}, ${user.address || null}, ${user.skills || []}, FALSE, ${user.autoAccept || false}, ${user.autoAcceptFrom || null}, ${user.autoAcceptTo || null}, ${user.preferredLocale || null})`;
     return id;
   },
 
@@ -765,13 +769,17 @@ export const db = {
   },
 
   // Push tokens for a society's admin(s) — used to notify on join requests.
-  getSocietyAdminTokens: async (societyId: string): Promise<string[]> => {
+  // Different admins of the same society can have different preferred languages, so this
+  // returns each admin's token alongside their own locale rather than a flat token list.
+  getSocietyAdminTokens: async (societyId: string): Promise<{ pushToken: string; preferredLocale: string | null }[]> => {
     const rows = await (sql as any)(
-      `SELECT expo_push_token FROM users
+      `SELECT expo_push_token, preferred_locale FROM users
         WHERE society_id = $1 AND role = 'SOCIETY_ADMIN' AND expo_push_token IS NOT NULL`,
       [societyId]
     );
-    return rows.map((r: any) => r.expo_push_token).filter(Boolean);
+    return rows
+      .filter((r: any) => r.expo_push_token)
+      .map((r: any) => ({ pushToken: r.expo_push_token, preferredLocale: r.preferred_locale || null }));
   },
 
   deleteUser: async (id: string): Promise<void> => {
@@ -1724,10 +1732,24 @@ export const db = {
     return rows[0]?.expo_push_token ?? null;
   },
 
-  // Get maid push token + household name for a staging contract (used for push notifications)
-  getMaidInfoForContract: async (stagingContractId: string): Promise<{ maidPushToken: string | null; householdName: string } | null> => {
+  // Push token + locale in one query, for call sites that need both (most notification sends).
+  getUserPushInfo: async (userId: string): Promise<{ pushToken: string | null; preferredLocale: string | null } | null> => {
     const rows = await (sql as any)(
-      `SELECT u_maid.expo_push_token AS maid_push_token, u_household.name AS household_name
+      `SELECT expo_push_token, preferred_locale FROM users WHERE id = $1`,
+      [userId]
+    );
+    if (rows.length === 0) return null;
+    return {
+      pushToken: rows[0].expo_push_token || null,
+      preferredLocale: rows[0].preferred_locale || null,
+    };
+  },
+
+  // Get maid push token + locale + household name for a staging contract (used for push notifications)
+  getMaidInfoForContract: async (stagingContractId: string): Promise<{ maidPushToken: string | null; maidPreferredLocale: string | null; householdName: string } | null> => {
+    const rows = await (sql as any)(
+      `SELECT u_maid.expo_push_token AS maid_push_token, u_maid.preferred_locale AS maid_preferred_locale,
+              u_household.name AS household_name
        FROM staging_contracts sc
        JOIN users u_maid ON sc.maid_id = u_maid.id
        JOIN users u_household ON sc.household_id = u_household.id
@@ -1737,35 +1759,72 @@ export const db = {
     if (rows.length === 0) return null;
     return {
       maidPushToken: rows[0].maid_push_token || null,
+      maidPreferredLocale: rows[0].maid_preferred_locale || null,
       householdName: rows[0].household_name || 'Household',
     };
   },
 
-  // Returns household push token + maid name for any booking (used to notify household on cancellation)
-  getNotificationInfoForBooking: async (bookingId: string): Promise<{ householdPushToken: string | null; maidName: string; serviceName: string } | null> => {
+  // Returns household push token/locale + maid name + service name(s) for any booking (used to
+  // notify household on cancellation/confirmation). service_name resolves multi-service bookings
+  // (society_service_id is NULL on the row; the real services live in booking_services) via the
+  // same LATERAL-join aggregation pattern used by getBookingsForUser, joined into one English
+  // string for the push body — service names stay English-only here, matching prior behavior.
+  getNotificationInfoForBooking: async (bookingId: string): Promise<{ householdPushToken: string | null; householdPreferredLocale: string | null; householdName: string; maidName: string; serviceName: string } | null> => {
     const rows = await (sql as any)(
       `SELECT u_household.expo_push_token AS household_push_token,
+              u_household.preferred_locale AS household_preferred_locale,
+              u_household.name AS household_name,
               u_maid.name AS maid_name,
-              COALESCE(ss.name->>'en', svc.name->>'en', 'Service') AS service_name
+              COALESCE(svc_agg.service_names_joined, ss.name->>'en', svc.name->>'en', 'Service') AS service_name
        FROM bookings b
        JOIN users u_household ON b.household_id = u_household.id
        LEFT JOIN users u_maid ON b.maid_id = u_maid.id
        LEFT JOIN society_services ss ON b.society_service_id = ss.id
        LEFT JOIN services svc ON ss.service_id = svc.id
+       LEFT JOIN LATERAL (
+         SELECT string_agg(COALESCE(ss2.name->>'en', svc2.name->>'en'), ', ' ORDER BY bs.sort_order) AS service_names_joined
+         FROM booking_services bs
+         LEFT JOIN society_services ss2 ON bs.society_service_id = ss2.id
+         LEFT JOIN services svc2 ON ss2.service_id = svc2.id
+         WHERE bs.booking_id = b.id
+       ) svc_agg ON true
        WHERE b.id = $1`,
       [bookingId]
     );
     if (rows.length === 0) return null;
     return {
       householdPushToken: rows[0].household_push_token || null,
+      householdPreferredLocale: rows[0].household_preferred_locale || null,
+      householdName: rows[0].household_name || 'Household',
       maidName: rows[0].maid_name || 'Your maid',
       serviceName: rows[0].service_name || 'Service',
     };
   },
 
-  getHouseholdInfoForContract: async (stagingContractId: string): Promise<{ householdPushToken: string | null; maidName: string } | null> => {
+  // Returns the MAID's push token/locale + household name for any booking (used to notify the
+  // maid when the household cancels — the mirror of getNotificationInfoForBooking).
+  getMaidNotificationInfoForBooking: async (bookingId: string): Promise<{ maidPushToken: string | null; maidPreferredLocale: string | null; householdName: string } | null> => {
     const rows = await (sql as any)(
-      `SELECT u_household.expo_push_token AS household_push_token, u_maid.name AS maid_name
+      `SELECT u_maid.expo_push_token AS maid_push_token, u_maid.preferred_locale AS maid_preferred_locale,
+              u_household.name AS household_name
+       FROM bookings b
+       JOIN users u_household ON b.household_id = u_household.id
+       LEFT JOIN users u_maid ON b.maid_id = u_maid.id
+       WHERE b.id = $1`,
+      [bookingId]
+    );
+    if (rows.length === 0) return null;
+    return {
+      maidPushToken: rows[0].maid_push_token || null,
+      maidPreferredLocale: rows[0].maid_preferred_locale || null,
+      householdName: rows[0].household_name || 'Household',
+    };
+  },
+
+  getHouseholdInfoForContract: async (stagingContractId: string): Promise<{ householdPushToken: string | null; householdPreferredLocale: string | null; maidName: string } | null> => {
+    const rows = await (sql as any)(
+      `SELECT u_household.expo_push_token AS household_push_token, u_household.preferred_locale AS household_preferred_locale,
+              u_maid.name AS maid_name
        FROM bookings b
        JOIN users u_household ON b.household_id = u_household.id
        JOIN users u_maid ON b.maid_id = u_maid.id
@@ -1778,6 +1837,7 @@ export const db = {
     if (rows.length === 0) return null;
     return {
       householdPushToken: rows[0].household_push_token || null,
+      householdPreferredLocale: rows[0].household_preferred_locale || null,
       maidName: rows[0].maid_name || 'Maid',
     };
   },

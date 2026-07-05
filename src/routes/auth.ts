@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../services/database';
 import { generateToken } from '../middleware/auth';
 import { startTwilioVerify, checkTwilioVerify, formatPhoneE164 } from '../services/twilio';
+import { SUPPORTED_LOCALES } from '../i18n/notifications';
 
 const router = Router();
 
@@ -85,11 +86,15 @@ router.post('/register/send-otp', async (req: Request, res: Response) => {
 // POST /api/auth/register — verify OTP then create user
 router.post('/register', async (req: Request, res: Response) => {
   try {
-    const { name, phone, username, password, role, societyId, address, otp, skills, autoAccept, autoAcceptFrom, autoAcceptTo } = req.body;
+    const { name, phone, username, password, role, societyId, address, otp, skills, autoAccept, autoAcceptFrom, autoAcceptTo, preferredLocale } = req.body;
     console.log('[Register] Received body:', JSON.stringify(req.body));
     const missingReg = [!name && 'name', !phone && 'phone', !username && 'username', !password && 'password', !role && 'role', !societyId && 'societyId', !otp && 'otp'].filter(Boolean);
     if (missingReg.length > 0) {
       res.status(400).json({ error: `Missing required fields: ${missingReg.join(', ')}` });
+      return;
+    }
+    if (preferredLocale !== undefined && preferredLocale !== null && !SUPPORTED_LOCALES.includes(preferredLocale)) {
+      res.status(400).json({ error: `preferredLocale must be one of: ${SUPPORTED_LOCALES.join(', ')}` });
       return;
     }
 
@@ -114,7 +119,7 @@ router.post('/register', async (req: Request, res: Response) => {
       return;
     }
 
-    const id = await db.registerUser({ name, phone, username, password, role, societyId, address, skills: skills || [], autoAccept: autoAccept || false, autoAcceptFrom: autoAcceptFrom || null, autoAcceptTo: autoAcceptTo || null });
+    const id = await db.registerUser({ name, phone, username, password, role, societyId, address, skills: skills || [], autoAccept: autoAccept || false, autoAcceptFrom: autoAcceptFrom || null, autoAcceptTo: autoAcceptTo || null, preferredLocale: preferredLocale || null });
     res.status(201).json({ id, message: 'Registration successful. Pending society admin approval.' });
   } catch (e: any) {
     console.error('[Auth Register Error]', e);
