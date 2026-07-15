@@ -29,7 +29,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Kamon Privacy Policy</h1>
-  <p class="updated">Last updated: June 2026</p>
+  <p class="updated">Last updated: July 2026</p>
 
   <p>Kamon ("we", "us", "the app") connects households with domestic service providers ("helpers")
   within residential societies. This policy explains what information we collect, how we use it, and
@@ -101,7 +101,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 
   <h2>10. Contact us</h2>
   <p>For privacy questions or to request data deletion, contact us at
-  <a href="mailto:murali@vikasam.co.uk">murali@vikasam.co.uk</a>.</p>
+  <a href="mailto:info@vikasam.co.uk">info@vikasam.co.uk</a>.</p>
 
   <footer>© 2026 Kamon. All rights reserved.</footer>
 </body>
