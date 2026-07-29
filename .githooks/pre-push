@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# Backend pre-push regression gate.
+# Runs typecheck + the full Jest suite (mirrors .github/workflows/test.yml)
+# and ABORTS the push if anything fails. Bypass with `git push --no-verify`.
+#
+# Activated via `git config core.hooksPath .githooks` (set automatically by the
+# package.json "prepare" script on npm install).
+
+echo "[pre-push] backend: typecheck (tsc --noEmit)…"
+npx tsc --noEmit || {
+  echo "[pre-push] ✗ TypeScript errors — push aborted. Fix them or use --no-verify." >&2
+  exit 1
+}
+
+echo "[pre-push] backend: running test suite (npm run test:ci)…"
+npm run test:ci || {
+  echo "[pre-push] ✗ Tests failed — push aborted. Fix the regression or use --no-verify." >&2
+  exit 1
+}
+
+echo "[pre-push] ✓ backend checks passed — pushing."
+exit 0
