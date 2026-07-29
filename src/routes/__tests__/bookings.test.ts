@@ -9,6 +9,14 @@ jest.mock('../../services/pushNotifications');
 
 const authHeader = `Bearer ${generateToken({ userId: 'household-1', role: 'HOUSEHOLD' })}`;
 
+// A date ~2 days out: comfortably >1 hour in the future AND within the 1-week booking cap,
+// regardless of when the suite runs. (A fixed far-future date like 2099 now trips the cap.)
+const pad = (n: number) => String(n).padStart(2, '0');
+const soonDate = (() => {
+  const d = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+})();
+
 beforeEach(() => {
   jest.clearAllMocks();
 });
@@ -21,7 +29,7 @@ describe('POST /api/bookings', () => {
     householdId: 'household-1',
     maidId: 'maid-1',
     societyServiceIds: ['ss-1'],
-    workStartDate: '2099-01-01',
+    workStartDate: soonDate,
     startTime: '10:00',
     endTime: '11:00',
   };
@@ -39,7 +47,7 @@ describe('POST /api/bookings', () => {
     const createdBooking = {
       id: 'booking-1',
       status: BookingStatus.CONFIRMED,
-      workStartDate: '2099-01-01',
+      workStartDate: soonDate,
       startTime: '10:00',
     };
     (db.createBooking as jest.Mock).mockResolvedValue(createdBooking);
@@ -63,7 +71,7 @@ describe('POST /api/bookings', () => {
     (db.createBooking as jest.Mock).mockResolvedValue({
       id: 'booking-2',
       status: BookingStatus.REQUESTED,
-      workStartDate: '2099-01-01',
+      workStartDate: soonDate,
       startTime: '10:00',
     });
     (db.getUserPushInfo as jest.Mock).mockResolvedValue({ pushToken: 'push-token-abc', preferredLocale: 'en' });
@@ -85,7 +93,7 @@ describe('POST /api/bookings', () => {
       id: 'booking-3',
       status: BookingStatus.CONFIRMED,
       autoAccepted: true,
-      workStartDate: '2099-01-01',
+      workStartDate: soonDate,
       startTime: '10:00',
     });
     (db.getNotificationInfoForBooking as jest.Mock).mockResolvedValue({
@@ -114,7 +122,7 @@ describe('POST /api/bookings', () => {
     (db.createBooking as jest.Mock).mockResolvedValue({
       id: 'booking-4',
       status: BookingStatus.REQUESTED,
-      workStartDate: '2099-01-01',
+      workStartDate: soonDate,
       startTime: '10:00',
     });
     (db.getUserPushInfo as jest.Mock).mockResolvedValue({ pushToken: 'push-maid', preferredLocale: null });
@@ -223,7 +231,7 @@ describe('POST /api/bookings', () => {
     (db.createBooking as jest.Mock).mockResolvedValue({
       id: 'booking-3',
       status: BookingStatus.CONFIRMED,
-      workStartDate: '2099-01-01',
+      workStartDate: soonDate,
       startTime: '10:00',
     });
 

@@ -97,6 +97,34 @@ describe('validateAdhocBookingTimes', () => {
     });
   });
 
+  describe('1-week-max-ahead check (using injectable now)', () => {
+    // now = 2026-01-01T00:00:00Z -> IST 2026-01-01 05:30; max bookable IST date = 2026-01-08.
+    const now = new Date('2026-01-01T00:00:00Z').getTime();
+
+    it('accepts a booking exactly 1 week ahead (2026-01-08)', () => {
+      expect(
+        validateAdhocBookingTimes({ startTime: '09:00', endTime: '10:00', workStartDate: '2026-01-08' }, now),
+      ).toBeNull();
+    });
+
+    it('rejects a booking more than 1 week ahead (2026-01-09)', () => {
+      expect(
+        validateAdhocBookingTimes({ startTime: '09:00', endTime: '10:00', workStartDate: '2026-01-09' }, now),
+      ).toBe('Bookings can be made up to 1 week in advance');
+    });
+
+    it('respects IST when computing the max date near a UTC day boundary', () => {
+      // now = 2026-01-01T20:00:00Z -> IST 2026-01-02 01:30; max bookable IST date = 2026-01-09.
+      const lateNow = new Date('2026-01-01T20:00:00Z').getTime();
+      expect(
+        validateAdhocBookingTimes({ startTime: '09:00', endTime: '10:00', workStartDate: '2026-01-09' }, lateNow),
+      ).toBeNull();
+      expect(
+        validateAdhocBookingTimes({ startTime: '09:00', endTime: '10:00', workStartDate: '2026-01-10' }, lateNow),
+      ).toBe('Bookings can be made up to 1 week in advance');
+    });
+  });
+
   describe('IST timezone anchoring', () => {
     it('interprets workStartDate+startTime as Asia/Kolkata, not UTC', () => {
       // 2026-03-10T08:00 IST = 2026-03-10T02:30 UTC.

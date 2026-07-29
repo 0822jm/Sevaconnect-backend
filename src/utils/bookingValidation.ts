@@ -42,6 +42,17 @@ export function validateAdhocBookingTimes(input: AdhocTimeInput, now: number = D
     }
   }
 
+  // Ad-hoc bookings can be made at most 1 week ahead (contracts are exempt — they never call
+  // this validator). Compared on the IST calendar day so it matches the client's calendar cap.
+  if (workStartDate) {
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const d = new Date(now + IST_OFFSET_MS + 7 * 24 * 60 * 60 * 1000);
+    const maxDate = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+    if (workStartDate > maxDate) {
+      return 'Bookings can be made up to 1 week in advance';
+    }
+  }
+
   return null;
 }
 
