@@ -20,6 +20,8 @@ export type NotificationKey =
   | 'booking.cancelledByHousehold'
   | 'booking.replacementAssignedContract'
   | 'booking.replacementAssignedAdhoc'
+  | 'booking.delayedHousehold'
+  | 'booking.delayedMaid'
   | 'contract.createdMaid'
   | 'contract.createdHousehold'
   | 'contract.updated'
@@ -71,6 +73,24 @@ const templates: Record<NotificationKey, Record<SupportedLocale, Template>> = {
     mr: { title: 'बुकिंग निश्चित झाले', body: '%{maidName} यांनी तुमची %{serviceName} बुकिंग स्वीकारली आहे. %{date} रोजी भेटूया!' },
     ta: { title: 'முன்பதிவு உறுதி செய்யப்பட்டது', body: '%{maidName} உங்கள் %{serviceName} முன்பதிவை ஏற்றுக்கொண்டார். %{date} அன்று சந்திப்போம்!' },
     te: { title: 'బుకింగ్ ధృవీకరించబడింది', body: '%{maidName} మీ %{serviceName} బుకింగ్‌ను ఆమోదించారు. %{date} న కలుద్దాం!' },
+  },
+  'booking.delayedHousehold': {
+    en: { title: 'Booking Delayed', body: "Your %{serviceName} booking on %{date} at %{time} hasn't been completed as scheduled. Tap to check." },
+    hi: { title: 'बुकिंग में देरी', body: '%{date} को %{time} बजे की आपकी %{serviceName} बुकिंग तय समय पर पूरी नहीं हुई है। जांचने के लिए टैप करें।' },
+    gu: { title: 'બુકિંગમાં વિલંબ', body: '%{date} ના રોજ %{time} વાગ્યાની તમારી %{serviceName} બુકિંગ સમયસર પૂર્ણ થઈ નથી. તપાસવા માટે ટેપ કરો.' },
+    kn: { title: 'ಬುಕಿಂಗ್ ವಿಳಂಬ', body: '%{date} ರಂದು %{time} ಗೆ ನಿಮ್ಮ %{serviceName} ಬುಕಿಂಗ್ ನಿಗದಿತ ಸಮಯಕ್ಕೆ ಪೂರ್ಣಗೊಂಡಿಲ್ಲ. ಪರಿಶೀಲಿಸಲು ಟ್ಯಾಪ್ ಮಾಡಿ.' },
+    mr: { title: 'बुकिंगला विलंब', body: '%{date} रोजी %{time} वाजताची तुमची %{serviceName} बुकिंग वेळेवर पूर्ण झालेली नाही. तपासण्यासाठी टॅप करा.' },
+    ta: { title: 'முன்பதிவு தாமதம்', body: '%{date} அன்று %{time} மணிக்கான உங்கள் %{serviceName} முன்பதிவு திட்டமிட்டபடி முடிக்கப்படவில்லை. சரிபார்க்க தட்டவும்.' },
+    te: { title: 'బుకింగ్ ఆలస్యం', body: '%{date} న %{time} కి మీ %{serviceName} బుకింగ్ షెడ్యూల్ ప్రకారం పూర్తి కాలేదు. తనిఖీ చేయడానికి నొక్కండి.' },
+  },
+  'booking.delayedMaid': {
+    en: { title: 'Job Overdue', body: "Your job on %{date} at %{time} hasn't been marked started or completed. Tap to update it." },
+    hi: { title: 'काम में देरी', body: '%{date} को %{time} बजे का आपका काम शुरू या पूरा के रूप में चिह्नित नहीं हुआ है। इसे अपडेट करने के लिए टैप करें।' },
+    gu: { title: 'કામમાં વિલંબ', body: '%{date} ના રોજ %{time} વાગ્યાનું તમારું કામ શરૂ કે પૂર્ણ તરીકે ચિહ્નિત થયું નથી. અપડેટ કરવા માટે ટેપ કરો.' },
+    kn: { title: 'ಕೆಲಸ ವಿಳಂಬ', body: '%{date} ರಂದು %{time} ಗೆ ನಿಮ್ಮ ಕೆಲಸವನ್ನು ಪ್ರಾರಂಭಿಸಲಾಗಿದೆ ಅಥವಾ ಪೂರ್ಣಗೊಂಡಿದೆ ಎಂದು ಗುರುತಿಸಲಾಗಿಲ್ಲ. ನವೀಕರಿಸಲು ಟ್ಯಾಪ್ ಮಾಡಿ.' },
+    mr: { title: 'कामाला विलंब', body: '%{date} रोजी %{time} वाजताचे तुमचे काम सुरू किंवा पूर्ण म्हणून चिन्हांकित केलेले नाही. अपडेट करण्यासाठी टॅप करा.' },
+    ta: { title: 'வேலை தாமதம்', body: '%{date} அன்று %{time} மணிக்கான உங்கள் வேலை தொடங்கப்பட்டதாக அல்லது முடிக்கப்பட்டதாக குறிக்கப்படவில்லை. புதுப்பிக்க தட்டவும்.' },
+    te: { title: 'పని ఆలస్యం', body: '%{date} న %{time} కి మీ పని ప్రారంభించబడిందని లేదా పూర్తయిందని గుర్తించబడలేదు. నవీకరించడానికి నొక్కండి.' },
   },
   'booking.declinedByMaid': {
     en: { title: 'Booking Declined', body: '%{maidName} is unable to accept your booking request for %{date}.' },

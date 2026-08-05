@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db, BookingStatus, UserRole } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
 import { sendLocalizedNotification } from '../services/pushNotifications';
+import { notifyDelayedBookings } from '../services/delayedSweep';
 import { validateAdhocBookingTimes } from '../utils/bookingValidation';
 
 const router = Router();
@@ -17,6 +18,7 @@ router.get('/user/:userId', async (req: Request, res: Response) => {
     }
     // Lazy on-fetch fallback: ensure stale bookings are swept before returning (throttled ~1/hr)
     await db.maybeSweepStaleBookings();
+    void notifyDelayedBookings(); // fire-and-forget same-day "Delayed" pushes (throttled ~15min)
     const bookings = await db.getBookingsForUser(req.params.userId, role as UserRole);
     res.json(bookings);
   } catch (e: any) {
@@ -231,6 +233,7 @@ router.post('/contracts/create', async (req: Request, res: Response) => {
 router.get('/society/:societyId', async (req: Request, res: Response) => {
   try {
     await db.maybeSweepStaleBookings();
+    void notifyDelayedBookings();
     const bookings = await db.getBookingsBySociety(req.params.societyId);
     res.json(bookings);
   } catch (e: any) {
@@ -749,6 +752,32 @@ router.post('/:id/generate-otp', async (req: Request, res: Response) => {
     const otp = await db.regenerateOtp(req.params.id, type);
     console.log(`[OTP] Regenerated ${type} OTP for booking ${req.params.id}: ${otp}`);
     res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/bookings/:id/report-no-show
+// Household action on a Delayed card: mark a not-yet-started ad-hoc/replacement booking as NO_SHOW
+// on demand (the same-day equivalent of the nightly sweep's CONFIRMED → NO_SHOW transition), so the
+// household doesn't have to wait until the next day. Contracts have no per-session state, so N/A.
+router.post('/:id/report-no-show', async (req: Request, res: Response) => {
+  try {
+    const booking = await db.getBookingById(req.params.id);
+    if (!booking) {
+      res.status(404).json({ error: 'Booking not found' });
+      return;
+    }
+    if (booking.bookingType === 'CONTRACT') {
+      res.status(400).json({ error: 'No-show reporting is not applicable for contract bookings.' });
+      return;
+    }
+    if (booking.status !== BookingStatus.CONFIRMED) {
+      res.status(409).json({ error: 'Only a confirmed, not-yet-started booking can be reported as a no-show.' });
+      return;
+    }
+    await db.updateBookingStatus(req.params.id, BookingStatus.NO_SHOW);
+    res.json({ success: true, status: BookingStatus.NO_SHOW });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

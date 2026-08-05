@@ -1312,6 +1312,31 @@ export const db = {
     }
   },
 
+  // Atomically claim ADHOC/REPLACEMENT bookings that have just gone "Delayed" — end time (IST) has
+  // passed but they were never completed via OTP — and stamp delayed_notified_at so each is only
+  // ever notified once (the claim is race-safe: the delayed_notified_at IS NULL condition + UPDATE
+  // means concurrent callers can't both claim the same row). "Delayed" itself stays derived/display-
+  // only; this marker exists solely to dedupe the one-time push. Returns the claimed rows.
+  claimDelayedBookingsToNotify: async (): Promise<Array<{ id: string; workStartDate: string; startTime: string }>> => {
+    const rows = await (sql as any)(
+      `UPDATE bookings SET delayed_notified_at = NOW()
+       WHERE eff_end_date = '3499-12-31'
+         AND booking_type IN ('ADHOC', 'REPLACEMENT')
+         AND delayed_notified_at IS NULL
+         AND ((status = 'CONFIRMED' AND start_otp_time IS NULL)
+           OR (status = 'IN_PROGRESS' AND end_otp_time IS NULL))
+         AND (work_start_date::date + end_time::time) < (now() AT TIME ZONE 'Asia/Kolkata')
+       RETURNING id, work_start_date, start_time`,
+    );
+    return rows.map((r: any) => ({
+      id: r.id,
+      workStartDate: r.work_start_date instanceof Date
+        ? r.work_start_date.toISOString().substring(0, 10)
+        : String(r.work_start_date).substring(0, 10),
+      startTime: String(r.start_time).substring(0, 5),
+    }));
+  },
+
   createBooking: async (booking: any): Promise<Booking> => {
     const id = booking.id || generateId('bk');
     const bookingType: BookingType = booking.bookingType || 'ADHOC';

@@ -13,6 +13,37 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
+describe('POST /api/bookings/:id/report-no-show', () => {
+  it('returns 404 when booking not found', async () => {
+    (db.getBookingById as jest.Mock).mockResolvedValue(null);
+    const res = await request(app).post('/api/bookings/b1/report-no-show').set('Authorization', authHeader);
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects contract bookings', async () => {
+    (db.getBookingById as jest.Mock).mockResolvedValue({ id: 'b1', bookingType: 'CONTRACT', status: BookingStatus.CONFIRMED });
+    const res = await request(app).post('/api/bookings/b1/report-no-show').set('Authorization', authHeader);
+    expect(res.status).toBe(400);
+    expect(db.updateBookingStatus).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the booking is not still CONFIRMED', async () => {
+    (db.getBookingById as jest.Mock).mockResolvedValue({ id: 'b1', bookingType: 'ADHOC', status: BookingStatus.IN_PROGRESS });
+    const res = await request(app).post('/api/bookings/b1/report-no-show').set('Authorization', authHeader);
+    expect(res.status).toBe(409);
+    expect(db.updateBookingStatus).not.toHaveBeenCalled();
+  });
+
+  it('marks a confirmed ad-hoc booking as NO_SHOW', async () => {
+    (db.getBookingById as jest.Mock).mockResolvedValue({ id: 'b1', bookingType: 'ADHOC', status: BookingStatus.CONFIRMED });
+    (db.updateBookingStatus as jest.Mock).mockResolvedValue(undefined);
+    const res = await request(app).post('/api/bookings/b1/report-no-show').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(BookingStatus.NO_SHOW);
+    expect(db.updateBookingStatus).toHaveBeenCalledWith('b1', BookingStatus.NO_SHOW);
+  });
+});
+
 describe('GET /api/bookings/:id/available-replacements', () => {
   it('returns 404 when booking not found', async () => {
     (db.getBookingById as jest.Mock).mockResolvedValue(null);
