@@ -31,6 +31,9 @@ const baseBody = {
 
 const autoMaid = { id: 'm1', name: 'Asha', trustScore: 70, autoAccept: true, autoAcceptFrom: '08:00', autoAcceptTo: '20:00' };
 const manualMaid = { id: 'm2', name: 'Bina', trustScore: 55, autoAccept: false, autoAcceptFrom: null, autoAcceptTo: null };
+// Auto-accept is ON, but the window (08:00–09:00) does NOT cover the requested 10:00–11:00 slot,
+// so this maid must NOT be treated as an instant AUTO_ACCEPT covering maid — she belongs to the ANY pool.
+const autoOutOfWindowMaid = { id: 'm3', name: 'Chandni', trustScore: 60, autoAccept: true, autoAcceptFrom: '08:00', autoAcceptTo: '09:00' };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -109,6 +112,37 @@ describe('POST /api/bookings/book-any-maid', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('NO_MAIDS_AVAILABLE');
     expect(db.assignAnyMaid).not.toHaveBeenCalled();
+  });
+
+  it('AUTO_ACCEPT: an auto-accept maid whose window does NOT cover the slot is excluded → 409', async () => {
+    (db.getAvailableMaidPool as jest.Mock).mockResolvedValue([autoOutOfWindowMaid]); // 08:00–09:00 window vs 10:00–11:00 slot
+
+    const res = await request(app)
+      .post('/api/bookings/book-any-maid')
+      .set('Authorization', authHeader)
+      .send({ ...baseBody, poolType: 'AUTO_ACCEPT' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('NO_MAIDS_AVAILABLE');
+    expect(db.assignAnyMaid).not.toHaveBeenCalled();
+  });
+
+  it('ANY: the same window-excluded auto-accept maid IS eligible for the manual pool', async () => {
+    (db.getAvailableMaidPool as jest.Mock).mockResolvedValue([autoOutOfWindowMaid]);
+    (db.assignAnyMaid as jest.Mock).mockResolvedValue({
+      booking: { id: 'bk5', status: BookingStatus.REQUESTED, anyMaidPool: 'ANY', workStartDate: soonDate, startTime: '10:00' },
+      maidId: 'm3', maidName: 'Chandni',
+    });
+
+    const res = await request(app)
+      .post('/api/bookings/book-any-maid')
+      .set('Authorization', authHeader)
+      .send({ ...baseBody, poolType: 'ANY' });
+
+    expect(res.status).toBe(201);
+    const call = (db.assignAnyMaid as jest.Mock).mock.calls[0][0];
+    expect(call.poolType).toBe('ANY');
+    expect(call.pool.map((m: any) => m.id)).toEqual(['m3']);
   });
 
   it('returns 409 when assignAnyMaid exhausts the pool (all candidates collided)', async () => {
