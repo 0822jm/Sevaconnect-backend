@@ -1,6 +1,7 @@
 import { neon } from '@neondatabase/serverless';
 import { generateId, hashPassword } from '../utils/helpers';
 import { formatPhoneE164 } from './twilio';
+import { pickWeighted } from '../utils/weightedPick';
 
 // Generate a random 4-digit OTP (1000-9999)
 const generate4DigitOtp = (): string => {
@@ -178,6 +179,11 @@ export interface Booking {
   householdAddress?: string;
   householdPhone?: string;
   autoAccepted?: boolean;
+  // "Any maid" random-assignment fields
+  anyMaidPool?: 'AUTO_ACCEPT' | 'ANY' | null;
+  idempotencyKey?: string | null;
+  matchedAt?: Date | string | null;
+  matching?: boolean; // display-only: set on redaction when the maid is still hidden from the household
   // SCD2 fields
   stagingContractId?: string;
   effStartDate?: string;
@@ -363,6 +369,8 @@ const mapBooking = (row: any): Booking => ({
   householdAddress: row.household_address,
   householdPhone: row.household_phone,
   autoAccepted: row.auto_accepted ? Boolean(row.auto_accepted) : false,
+  anyMaidPool: row.any_maid_pool ?? null,
+  matchedAt: row.matched_at ? new Date(row.matched_at).toISOString() : null,
   // SCD2 fields
   stagingContractId: row.staging_contract_id,
   effStartDate: row.eff_start_date instanceof Date ? row.eff_start_date.toISOString().substring(0, 10) : row.eff_start_date,
@@ -379,10 +387,54 @@ const mapMessage = (row: any): ChatMessage => ({
   timestamp: row.timestamp,
 });
 
+/**
+ * "Any maid" privacy: while an any-maid booking is still REQUESTED (a maid has been assigned but
+ * hasn't accepted yet, or we're mid-reassign), the HOUSEHOLD must not see which maid was picked —
+ * they only ever chose "any available maid". Null the maid identity and flag `matching:true` so the
+ * client renders "Matching you with a maid…". Once CONFIRMED the maid is revealed normally. The
+ * maid's own view is never redacted.
+ */
+export function redactMatchingMaid(booking: Booking, viewerRole?: string): Booking {
+  if (viewerRole === 'HOUSEHOLD' && booking.anyMaidPool && booking.status === BookingStatus.REQUESTED) {
+    return { ...booking, maidId: '', maidName: undefined, maidPhone: undefined, matching: true };
+  }
+  return booking;
+}
+
+/**
+ * True when an error is the maid-slot exclusion-constraint violation (Postgres 23P01) raised by
+ * `bookings_no_maid_slot_overlap` — i.e. this maid was concurrently booked for an overlapping slot.
+ * Callers turn this into a re-pick (any-maid flow) or a clean 409 (named-maid flow).
+ */
+export function isMaidSlotConflict(e: any): boolean {
+  const code = e?.code || e?.sourceError?.code || '';
+  const msg = String(e?.message || '');
+  return code === '23P01' || msg.includes('bookings_no_maid_slot_overlap') || msg.includes('exclusion');
+}
+
 // ── Database Operations ──
 
 // Throttle for the lazy on-fetch stale-booking sweep (see maybeSweepStaleBookings).
 let _lastStaleSweepAt = 0;
+
+// Materialised trust score (0–100, default 50). Stored in users.trust_score (see migrate-any-maid.ts)
+// and read cheaply by the "any maid" pool. Kept fresh by recomputeTrustScore() on review/booking-status
+// changes and by the nightly refreshAllTrustScores(). Mirrors the inline formula in login/getUserById.
+const TRUST_SCORE_SQL = `ROUND(COALESCE(
+  CASE
+    WHEN (SELECT COUNT(*) FROM reviews WHERE maid_id = u.id) = 0
+     AND (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status != 'REQUESTED') = 0
+    THEN 50
+    ELSE
+      (SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE maid_id = u.id) / 5.0 * 60
+      + (1.0 - (SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'CANCELLED')::float
+              / GREATEST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status NOT IN ('REQUESTED','TERMINATED')), 1)) * 30
+      + LEAST((SELECT COUNT(*) FROM (SELECT DISTINCT ON (id) status FROM bookings WHERE maid_id = u.id ORDER BY id, eff_end_date DESC) sub WHERE sub.status = 'COMPLETED')::float / 50.0, 1.0) * 10
+  END
+, 50))`;
+
+// Trust-affecting terminal transitions — recompute the maid's stored score when a booking reaches one.
+const TRUST_AFFECTING_STATUSES = new Set(['CANCELLED', 'COMPLETED', 'NO_SHOW', 'INCOMPLETE']);
 
 export const db = {
   // ─── Auth ───
@@ -1224,7 +1276,8 @@ export const db = {
       ORDER BY sub.work_start_date DESC, sub.start_time DESC`,
       [userId]
     );
-    return rows.map(mapBooking);
+    // Any-maid privacy: hide the assigned maid from the household until the booking is CONFIRMED.
+    return rows.map((r: any) => redactMatchingMaid(mapBooking(r), role));
   },
 
   getBookingsBySociety: async (societyId: string): Promise<Booking[]> => {
@@ -1312,6 +1365,45 @@ export const db = {
     }
   },
 
+  // Recompute + store one maid's trust score (called after review/booking-status changes).
+  recomputeTrustScore: async (maidId: string): Promise<void> => {
+    try {
+      await (sql as any)(`UPDATE users u SET trust_score = ${TRUST_SCORE_SQL} WHERE u.id = $1 AND u.role = 'MAID'`, [maidId]);
+    } catch (e) {
+      console.error('[recomputeTrustScore] failed', e);
+    }
+  },
+
+  // Nightly full refresh (safety net; run via the lease-gated scheduler).
+  refreshAllTrustScores: async (): Promise<void> => {
+    await (sql as any)(`UPDATE users u SET trust_score = ${TRUST_SCORE_SQL} WHERE u.role = 'MAID'`, []);
+  },
+
+  // Leader election for scheduled jobs across N Render instances — a lease row per job (see the
+  // cron_leases table). Returns true iff THIS caller won the lease for `ttlMinutes` (i.e. no live
+  // lease existed). Atomic single statement, so it's safe over Neon's stateless HTTP driver where a
+  // session-scoped advisory lock would be released the moment its request ends. The lease simply
+  // expires — no explicit release needed — so a crashed leader can't wedge the job forever.
+  tryAcquireCronLease: async (jobName: string, ttlMinutes: number): Promise<boolean> => {
+    try {
+      const rows = await (sql as any)(
+        `INSERT INTO cron_leases (job_name, locked_until, locked_by)
+           VALUES ($1, now() + ($2 || ' minutes')::interval, $3)
+         ON CONFLICT (job_name) DO UPDATE
+           SET locked_until = EXCLUDED.locked_until, locked_by = EXCLUDED.locked_by
+           WHERE cron_leases.locked_until IS NULL OR cron_leases.locked_until < now()
+         RETURNING job_name`,
+        [jobName, String(ttlMinutes), process.env.RENDER_INSTANCE_ID || `${process.pid}`],
+      );
+      return rows.length > 0;
+    } catch (e) {
+      // If the lease table doesn't exist yet (migration not run), fail OPEN so the single-instance
+      // dev/pre-migration case still runs the job.
+      console.error('[tryAcquireCronLease] failed (running unguarded)', (e as any)?.message);
+      return true;
+    }
+  },
+
   // Atomically claim ADHOC/REPLACEMENT bookings that have just gone "Delayed" — end time (IST) has
   // passed but they were never completed via OTP — and stamp delayed_notified_at so each is only
   // ever notified once (the claim is race-safe: the delayed_notified_at IS NULL condition + UPDATE
@@ -1355,13 +1447,15 @@ export const db = {
         work_start_date, work_end_date, start_time, end_time, status,
         is_recurring, frequency, custom_frequency_days,
         custom_price, custom_description, price_at_booking,
-        staging_contract_id, auto_accepted, update_comments
+        staging_contract_id, auto_accepted, update_comments,
+        any_maid_pool, idempotency_key, matched_at
       ) VALUES (
         $1, $2, $3, $4, $5, $6,
         $7, $8, $9, $10, $11,
         $12, $13, $14,
         $15, $16, $17,
-        $18, $19, $20
+        $18, $19, $20,
+        $21, $22, $23
       )`,
       [
         id, bookingType, booking.isReplacementOf || null,
@@ -1371,6 +1465,7 @@ export const db = {
         booking.isRecurring || false, booking.frequency || null, booking.customFrequencyDays || null,
         booking.customPrice || null, booking.customDescription || null, booking.priceAtBooking || null,
         booking.stagingContractId || null, booking.autoAccepted || false, booking.updateComments || null,
+        booking.anyMaidPool || null, booking.idempotencyKey || null, booking.matchedAt || null,
       ]
     );
 
@@ -1455,6 +1550,10 @@ export const db = {
         `UPDATE bookings SET status = $1 WHERE id = $2 AND eff_end_date = '3499-12-31'`,
         [status, id]
       );
+    }
+    if (TRUST_AFFECTING_STATUSES.has(status)) {
+      const r = await (sql as any)(`SELECT maid_id FROM bookings WHERE id = $1 AND eff_end_date = '3499-12-31'`, [id]);
+      if (r[0]?.maid_id) await db.recomputeTrustScore(r[0].maid_id);
     }
   },
 
@@ -1569,6 +1668,7 @@ export const db = {
     const date = new Date().toISOString().split('T')[0];
     await sql`INSERT INTO reviews (id, booking_id, maid_id, household_id, household_name, rating, comment, date) VALUES (${id}, ${review.bookingId}, ${review.maidId}, ${review.householdId}, ${review.householdName}, ${review.rating}, ${review.comment}, ${date})`;
     await (sql as any)(`UPDATE bookings SET is_reviewed = TRUE WHERE id = $1 AND eff_end_date = '3499-12-31'`, [review.bookingId]);
+    await db.recomputeTrustScore(review.maidId);
   },
 
   // ─── Contracts ───
@@ -1638,12 +1738,16 @@ export const db = {
     return id;
   },
 
-  getBookingById: async (id: string): Promise<Booking | null> => {
+  // `viewerRole` is optional: internal callers (reassign, notifications, status flows) omit it and
+  // get the real maid_id; pass 'HOUSEHOLD' at a household-facing route boundary to redact the
+  // assigned maid while an any-maid booking is still REQUESTED (see redactMatchingMaid).
+  getBookingById: async (id: string, viewerRole?: string): Promise<Booking | null> => {
     const rows = await (sql as any)(
       `SELECT b.* FROM bookings b WHERE b.id = $1 ORDER BY b.eff_end_date DESC LIMIT 1`,
       [id]
     );
-    return rows.length > 0 ? mapBooking(rows[0]) : null;
+    if (rows.length === 0) return null;
+    return viewerRole ? redactMatchingMaid(mapBooking(rows[0]), viewerRole) : mapBooking(rows[0]);
   },
 
   // SCD Type 2: close current version and insert new row with updated data
@@ -2121,6 +2225,183 @@ export const db = {
   },
 
   // Get available replacement maids for a booking's date/time slot
+  // Eligible-maid pool for a prospective slot — verified maids in the society (+ multi-society
+  // members), skill-matched, free at the slot (no conflicting adhoc/replacement/contract session),
+  // not on leave, minus excludeIds. Reads the materialised trust_score + auto-accept window.
+  // (Mirrors getAvailableReplacementMaids' eligibility; kept parallel to avoid refactoring that
+  // tested flow — DRY as a follow-up.)
+  getAvailableMaidPool: async (p: {
+    societyId: string; date: string; startTime: string; endTime: string;
+    requiredServiceIds?: string[]; excludeIds?: string[];
+  }): Promise<Array<{ id: string; name: string; trustScore: number; autoAccept: boolean; autoAcceptFrom: string | null; autoAcceptTo: string | null }>> => {
+    const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const dayOfWeek = dayNames[new Date(p.date + 'T00:00:00').getDay()];
+    const excludeArray = p.excludeIds && p.excludeIds.length ? p.excludeIds : null;
+    const requiredServiceIds = p.requiredServiceIds && p.requiredServiceIds.length ? p.requiredServiceIds : null;
+    const rows = await (sql as any)(
+      `SELECT u.id, u.name, COALESCE(u.trust_score, 50) AS trust_score, u.auto_accept, u.auto_accept_from, u.auto_accept_to
+       FROM users u
+       LEFT JOIN maid_societies ms ON ms.maid_id = u.id AND ms.society_id = $1
+       WHERE (u.society_id = $1 OR ms.id IS NOT NULL)
+         AND u.role = 'MAID' AND u.deleted_at IS NULL
+         AND COALESCE(ms.is_verified, u.is_verified) = true
+         AND ($2::text[] IS NULL OR NOT (u.id = ANY($2::text[])))
+         AND ($7::text[] IS NULL OR cardinality($7::text[]) = 0
+              OR COALESCE(ms.skills, u.skills) IS NULL OR cardinality(COALESCE(ms.skills, u.skills)) = 0
+              OR COALESCE(ms.skills, u.skills) @> $7::text[])
+         AND NOT EXISTS (
+           SELECT 1 FROM bookings b
+           WHERE b.maid_id = u.id AND b.eff_end_date = '3499-12-31'
+             AND b.status NOT IN ('CANCELLED', 'TERMINATED')
+             AND ((b.booking_type IN ('ADHOC','REPLACEMENT') AND b.work_start_date = $3 AND b.start_time < $5 AND b.end_time > $4)
+               OR (b.booking_type = 'CONTRACT' AND b.work_start_date <= $3 AND b.work_end_date >= $3
+                   AND b.start_time < $5 AND b.end_time > $4
+                   AND (b.frequency = 'DAILY' OR $6 = ANY(string_to_array(b.frequency, ',')))
+                   AND NOT EXISTS (SELECT 1 FROM bookings r WHERE r.is_replacement_of = b.id AND r.booking_type = 'REPLACEMENT' AND r.work_start_date = $3 AND r.eff_end_date = '3499-12-31'))))
+         AND NOT EXISTS (
+           SELECT 1 FROM maid_leaves ml WHERE ml.maid_id = u.id AND ml.leave_date = $3::date
+             AND (ml.leave_type = 'FULL' OR (ml.leave_type = 'MORNING' AND $4 < '12:00') OR (ml.leave_type = 'AFTERNOON' AND $5 > '12:00')))
+       ORDER BY COALESCE(u.trust_score, 50) DESC, u.id`,
+      [p.societyId, excludeArray, p.date, p.startTime, p.endTime, dayOfWeek, requiredServiceIds],
+    );
+    return rows.map((r: any) => ({
+      id: r.id,
+      name: r.name,
+      trustScore: r.trust_score != null ? Number(r.trust_score) : 50,
+      autoAccept: !!r.auto_accept,
+      autoAcceptFrom: r.auto_accept_from ? String(r.auto_accept_from).substring(0, 5) : null,
+      autoAcceptTo: r.auto_accept_to ? String(r.auto_accept_to).substring(0, 5) : null,
+    }));
+  },
+
+  getBookingByIdempotencyKey: async (key: string): Promise<Booking | null> => {
+    const rows = await (sql as any)(
+      `SELECT * FROM bookings WHERE idempotency_key = $1 AND eff_end_date = '3499-12-31' LIMIT 1`, [key],
+    );
+    return rows[0] ? mapBooking(rows[0]) : null;
+  },
+
+  // Weighted-random assignment for the "any maid" flow. Query the pool once, pick weighted, try to
+  // create the booking (createBooking's INSERT is guarded by the exclusion constraint). On a
+  // collision (23P01) drop that maid and re-pick; on the idempotency unique-violation (23505) a
+  // concurrent request already assigned — return that booking. Empty pool → null (endpoint → 409).
+  assignAnyMaid: async (opts: {
+    poolType: 'AUTO_ACCEPT' | 'ANY';
+    pool: Array<{ id: string; name: string; trustScore: number; autoAccept: boolean; autoAcceptFrom: string | null; autoAcceptTo: string | null }>;
+    bookingParams: any;
+    idempotencyKey?: string | null;
+  }): Promise<{ booking: Booking; maidId: string; maidName: string } | null> => {
+    const t0 = Date.now();
+    const poolSize = opts.pool.length;
+    let remaining = [...opts.pool];
+    let attempts = 0;
+    let collisions = 0;
+    while (remaining.length > 0) {
+      attempts++;
+      const picked = pickWeighted(remaining)!;
+      remaining = remaining.filter((m) => m.id !== picked.id);
+      try {
+        const booking = await db.createBooking({
+          ...opts.bookingParams,
+          maidId: picked.id,
+          anyMaidPool: opts.poolType,
+          idempotencyKey: opts.idempotencyKey || null,
+          matchedAt: new Date(),
+        });
+        console.log(JSON.stringify({ evt: 'any_maid_assigned', poolType: opts.poolType, poolSize, attempts, collisions, maidId: picked.id, status: booking.status, timeToMatchMs: Date.now() - t0 }));
+        return { booking, maidId: picked.id, maidName: picked.name };
+      } catch (e: any) {
+        const code = e?.code || e?.sourceError?.code || '';
+        const msg = String(e?.message || '');
+        if (code === '23505' || msg.includes('idempotency_key')) {
+          const existing = opts.idempotencyKey ? await db.getBookingByIdempotencyKey(opts.idempotencyKey) : null;
+          if (existing && existing.maidId) return { booking: existing, maidId: existing.maidId, maidName: '' };
+        }
+        if (isMaidSlotConflict(e)) {
+          collisions++;
+          continue; // maid taken concurrently → re-pick
+        }
+        throw e;
+      }
+    }
+    console.log(JSON.stringify({ evt: 'any_maid_no_maids', poolType: opts.poolType, poolSize, attempts, collisions, timeToMatchMs: Date.now() - t0 }));
+    return null;
+  },
+
+  // Re-pick another maid for a still-REQUESTED any-maid booking (the assigned maid declined, or the
+  // 30-min accept timeout elapsed). Reassigns the SAME row in place (keeps it REQUESTED), appending
+  // the outgoing maid to tried_maid_ids so they're never re-picked. The exclusion constraint guards
+  // the UPDATE — a collision (23P01) drops that candidate and re-picks. Pool exhausted → CANCELLED.
+  reassignAnyMaid: async (
+    bookingId: string,
+    opts?: { reason?: string },
+  ): Promise<{ status: 'REASSIGNED'; maidId: string; maidName: string } | { status: 'EXHAUSTED' } | { status: 'SKIP' }> => {
+    const booking = await db.getBookingById(bookingId);
+    if (!booking || !booking.anyMaidPool || booking.status !== BookingStatus.REQUESTED) return { status: 'SKIP' };
+    const hhRows = await (sql as any)(`SELECT society_id FROM users WHERE id = $1`, [booking.householdId]);
+    const societyId: string | undefined = hhRows[0]?.society_id;
+    if (!societyId) return { status: 'SKIP' };
+
+    const bsRows = await (sql as any)(`SELECT society_service_id FROM booking_services WHERE booking_id = $1`, [bookingId]);
+    const requiredServiceIds: string[] = bsRows.map((r: any) => r.society_service_id).filter(Boolean);
+    const triedRows = await (sql as any)(`SELECT tried_maid_ids FROM bookings WHERE id = $1 AND eff_end_date = '3499-12-31'`, [bookingId]);
+    const alreadyTried: string[] = triedRows[0]?.tried_maid_ids || [];
+    const currentMaid = booking.maidId;
+    const excludeIds = Array.from(new Set([...alreadyTried, currentMaid].filter(Boolean))) as string[];
+
+    const t0 = Date.now();
+    let pool = await db.getAvailableMaidPool({
+      societyId, date: booking.workStartDate, startTime: booking.startTime, endTime: booking.endTime,
+      requiredServiceIds, excludeIds,
+    });
+    let attempts = 0;
+    let collisions = 0;
+    while (pool.length > 0) {
+      attempts++;
+      const picked = pickWeighted(pool)!;
+      pool = pool.filter((m) => m.id !== picked.id);
+      try {
+        await (sql as any)(
+          `UPDATE bookings
+             SET maid_id = $1,
+                 tried_maid_ids = (SELECT ARRAY(SELECT DISTINCT unnest(COALESCE(tried_maid_ids, '{}'::text[]) || $2::text[]))),
+                 matched_at = NOW()
+           WHERE id = $3 AND eff_end_date = '3499-12-31' AND status = 'REQUESTED' AND any_maid_pool IS NOT NULL`,
+          [picked.id, [currentMaid], bookingId],
+        );
+        console.log(JSON.stringify({ evt: 'any_maid_reassigned', bookingId, reason: opts?.reason || 'decline', attempts, collisions, maidId: picked.id, timeToMatchMs: Date.now() - t0 }));
+        return { status: 'REASSIGNED', maidId: picked.id, maidName: picked.name };
+      } catch (e: any) {
+        if (isMaidSlotConflict(e)) { collisions++; continue; }
+        throw e;
+      }
+    }
+    // Pool exhausted → cancel in place and surface to the household.
+    await (sql as any)(
+      `UPDATE bookings
+         SET status = 'CANCELLED',
+             tried_maid_ids = (SELECT ARRAY(SELECT DISTINCT unnest(COALESCE(tried_maid_ids, '{}'::text[]) || $1::text[])))
+       WHERE id = $2 AND eff_end_date = '3499-12-31' AND status = 'REQUESTED'`,
+      [[currentMaid], bookingId],
+    );
+    console.log(JSON.stringify({ evt: 'any_maid_exhausted', bookingId, reason: opts?.reason || 'decline', attempts, collisions, timeToMatchMs: Date.now() - t0 }));
+    return { status: 'EXHAUSTED' };
+  },
+
+  // Any-maid bookings still awaiting acceptance past the timeout — the timeout re-pick sweep source.
+  getTimedOutAnyMaidBookings: async (timeoutMinutes = 30): Promise<string[]> => {
+    const rows = await (sql as any)(
+      `SELECT id FROM bookings
+        WHERE eff_end_date = '3499-12-31' AND status = 'REQUESTED'
+          AND any_maid_pool IS NOT NULL AND matched_at IS NOT NULL
+          AND matched_at < NOW() - ($1 || ' minutes')::interval
+        ORDER BY matched_at ASC
+        LIMIT 100`,
+      [String(timeoutMinutes)],
+    );
+    return rows.map((r: any) => r.id);
+  },
+
   getAvailableReplacementMaids: async (bookingId: string): Promise<{
     maids: Array<{ id: string; name: string; rating: number; trustScore: number; autoAccept: boolean; replacementCost: number }>;
     hourlyRate: number; durationHours: number; isContractReplacement: boolean;

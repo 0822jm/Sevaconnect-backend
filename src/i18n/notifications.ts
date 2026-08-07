@@ -22,6 +22,8 @@ export type NotificationKey =
   | 'booking.replacementAssignedAdhoc'
   | 'booking.delayedHousehold'
   | 'booking.delayedMaid'
+  | 'booking.anyMaidMatching'
+  | 'booking.anyMaidNoneAvailable'
   | 'contract.createdMaid'
   | 'contract.createdHousehold'
   | 'contract.updated'
@@ -91,6 +93,24 @@ const templates: Record<NotificationKey, Record<SupportedLocale, Template>> = {
     mr: { title: 'कामाला विलंब', body: '%{date} रोजी %{time} वाजताचे तुमचे काम सुरू किंवा पूर्ण म्हणून चिन्हांकित केलेले नाही. अपडेट करण्यासाठी टॅप करा.' },
     ta: { title: 'வேலை தாமதம்', body: '%{date} அன்று %{time} மணிக்கான உங்கள் வேலை தொடங்கப்பட்டதாக அல்லது முடிக்கப்பட்டதாக குறிக்கப்படவில்லை. புதுப்பிக்க தட்டவும்.' },
     te: { title: 'పని ఆలస్యం', body: '%{date} న %{time} కి మీ పని ప్రారంభించబడిందని లేదా పూర్తయిందని గుర్తించబడలేదు. నవీకరించడానికి నొక్కండి.' },
+  },
+  'booking.anyMaidMatching': {
+    en: { title: 'Finding you a maid', body: "We're matching you with a maid for your booking on %{date} at %{time} — we'll confirm shortly." },
+    hi: { title: 'आपके लिए मेड ढूंढ रहे हैं', body: '%{date} को %{time} बजे की आपकी बुकिंग के लिए हम एक मेड ढूंढ रहे हैं — जल्द ही पुष्टि करेंगे।' },
+    gu: { title: 'તમારા માટે મેઇડ શોધી રહ્યા છીએ', body: '%{date} ના રોજ %{time} વાગ્યાની તમારી બુકિંગ માટે અમે મેઇડ શોધી રહ્યા છીએ — જલ્દી પુષ્ટિ કરીશું.' },
+    kn: { title: 'ನಿಮಗಾಗಿ ಮೇಡ್ ಹುಡುಕುತ್ತಿದ್ದೇವೆ', body: '%{date} ರಂದು %{time} ಗೆ ನಿಮ್ಮ ಬುಕಿಂಗ್‌ಗಾಗಿ ನಾವು ಮೇಡ್ ಹುಡುಕುತ್ತಿದ್ದೇವೆ — ಶೀಘ್ರದಲ್ಲೇ ಖಚಿತಪಡಿಸುತ್ತೇವೆ.' },
+    mr: { title: 'तुमच्यासाठी मेड शोधत आहोत', body: '%{date} रोजी %{time} वाजताच्या तुमच्या बुकिंगसाठी आम्ही मेड शोधत आहोत — लवकरच पुष्टी करू.' },
+    ta: { title: 'உங்களுக்கு பணிப்பெண் தேடுகிறோம்', body: '%{date} அன்று %{time} மணிக்கான உங்கள் முன்பதிவுக்கு நாங்கள் பணிப்பெண்ணைத் தேடுகிறோம் — விரைவில் உறுதி செய்வோம்.' },
+    te: { title: 'మీ కోసం పనిమనిషిని కనుగొంటున్నాము', body: '%{date} న %{time} కి మీ బుకింగ్ కోసం మేము పనిమనిషిని కనుగొంటున్నాము — త్వరలో ధృవీకరిస్తాము.' },
+  },
+  'booking.anyMaidNoneAvailable': {
+    en: { title: 'No maids available', body: "Sorry, we couldn't find a maid for your booking on %{date} at %{time}. Please try another time." },
+    hi: { title: 'कोई मेड उपलब्ध नहीं', body: 'क्षमा करें, %{date} को %{time} बजे की आपकी बुकिंग के लिए कोई मेड नहीं मिली। कृपया कोई और समय आज़माएँ।' },
+    gu: { title: 'કોઈ મેઇડ ઉપલબ્ધ નથી', body: 'માફ કરશો, %{date} ના રોજ %{time} વાગ્યાની તમારી બુકિંગ માટે અમને કોઈ મેઇડ મળી નહીં. કૃપા કરી બીજો સમય અજમાવો.' },
+    kn: { title: 'ಯಾವುದೇ ಮೇಡ್ ಲಭ್ಯವಿಲ್ಲ', body: 'ಕ್ಷಮಿಸಿ, %{date} ರಂದು %{time} ಗೆ ನಿಮ್ಮ ಬುಕಿಂಗ್‌ಗಾಗಿ ನಮಗೆ ಮೇಡ್ ಸಿಗಲಿಲ್ಲ. ದಯವಿಟ್ಟು ಬೇರೆ ಸಮಯವನ್ನು ಪ್ರಯತ್ನಿಸಿ.' },
+    mr: { title: 'कोणतीही मेड उपलब्ध नाही', body: 'माफ करा, %{date} रोजी %{time} वाजताच्या तुमच्या बुकिंगसाठी आम्हाला मेड सापडली नाही. कृपया दुसरी वेळ वापरून पहा.' },
+    ta: { title: 'பணிப்பெண் யாரும் இல்லை', body: 'மன்னிக்கவும், %{date} அன்று %{time} மணிக்கான உங்கள் முன்பதிவுக்கு பணிப்பெண்ணைக் கண்டறிய முடியவில்லை. வேறு நேரத்தை முயற்சிக்கவும்.' },
+    te: { title: 'పనిమనుషులు అందుబాటులో లేరు', body: 'క్షమించండి, %{date} న %{time} కి మీ బుకింగ్ కోసం పనిమనిషిని కనుగొనలేకపోయాము. దయచేసి మరో సమయాన్ని ప్రయత్నించండి.' },
   },
   'booking.declinedByMaid': {
     en: { title: 'Booking Declined', body: '%{maidName} is unable to accept your booking request for %{date}.' },

@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
-import { db, BookingStatus, UserRole } from '../services/database';
+import { db, BookingStatus, UserRole, redactMatchingMaid, isMaidSlotConflict } from '../services/database';
 import { authMiddleware } from '../middleware/auth';
 import { sendLocalizedNotification } from '../services/pushNotifications';
 import { notifyDelayedBookings } from '../services/delayedSweep';
+import { reassignAndNotify, sweepTimedOutAnyMaid } from '../services/anyMaidReassign';
 import { validateAdhocBookingTimes } from '../utils/bookingValidation';
 
 const router = Router();
@@ -19,6 +20,7 @@ router.get('/user/:userId', async (req: Request, res: Response) => {
     // Lazy on-fetch fallback: ensure stale bookings are swept before returning (throttled ~1/hr)
     await db.maybeSweepStaleBookings();
     void notifyDelayedBookings(); // fire-and-forget same-day "Delayed" pushes (throttled ~15min)
+    void sweepTimedOutAnyMaid(); // fire-and-forget any-maid accept-timeout re-picks (throttled ~5min)
     const bookings = await db.getBookingsForUser(req.params.userId, role as UserRole);
     res.json(bookings);
   } catch (e: any) {
@@ -343,6 +345,135 @@ router.post('/', async (req: Request, res: Response) => {
     }
     res.status(201).json(booking);
   } catch (e: any) {
+    // The exclusion constraint fired: this maid was concurrently booked for an overlapping slot.
+    if (isMaidSlotConflict(e)) {
+      res.status(409).json({ error: 'This maid is no longer available for the selected time.' });
+      return;
+    }
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/bookings/book-any-maid — household chose "any available maid"; the SERVER assigns one
+// (weighted by trust score) from the eligible pool. No maidId is trusted from the client. `poolType`
+// tells us which option the client displayed:
+//   'AUTO_ACCEPT' → maids whose auto-accept covers the slot → booking is instantly CONFIRMED.
+//   'ANY'         → maids without auto-accept → REQUESTED; the assigned maid stays HIDDEN from the
+//                   household ("matching you with a maid…") until they accept.
+// Idempotency-key protects against double-submits / cross-instance retries.
+router.post('/book-any-maid', async (req: Request, res: Response) => {
+  try {
+    const bookingType = req.body.bookingType || 'ADHOC';
+    const poolType: 'AUTO_ACCEPT' | 'ANY' = req.body.poolType === 'AUTO_ACCEPT' ? 'AUTO_ACCEPT' : 'ANY';
+    const idempotencyKey: string | null = req.body.idempotencyKey || null;
+
+    // Working-hours + future-time validation (identical to the named-maid flow).
+    if (bookingType === 'ADHOC') {
+      const timeError = validateAdhocBookingTimes(req.body);
+      if (timeError) {
+        res.status(400).json({ error: timeError });
+        return;
+      }
+    }
+
+    // Idempotency: a retried request with the same key returns the already-created booking
+    // (redacted if still awaiting the maid's acceptance).
+    if (idempotencyKey) {
+      const existing = await db.getBookingByIdempotencyKey(idempotencyKey);
+      if (existing) {
+        res.status(201).json(redactMatchingMaid(existing, 'HOUSEHOLD'));
+        return;
+      }
+    }
+
+    // Resolve the booking's society from the household.
+    const household = await db.getUserById(req.body.householdId);
+    const societyId = (household as any)?.societyId;
+    if (!societyId) {
+      res.status(400).json({ error: 'Household is not assigned to a society' });
+      return;
+    }
+
+    const requiredServiceIds: string[] = Array.isArray(req.body.societyServiceIds) && req.body.societyServiceIds.length
+      ? req.body.societyServiceIds
+      : (req.body.societyServiceId ? [req.body.societyServiceId] : []);
+
+    // Exclude the preferred maid — they're offered separately at the top of the list.
+    const excludeIds: string[] = [];
+    if (req.body.preferredMaidId) excludeIds.push(req.body.preferredMaidId);
+
+    const pool = await db.getAvailableMaidPool({
+      societyId,
+      date: req.body.workStartDate,
+      startTime: req.body.startTime,
+      endTime: req.body.endTime,
+      requiredServiceIds,
+      excludeIds,
+    });
+
+    // Partition: a maid "covers" the slot when auto-accept is on AND (no window ⇒ always, else the
+    // slot fits inside the window) — mirrors createBooking's auto-accept detection exactly so the
+    // resulting status matches the pool the household picked.
+    const covers = (m: { autoAccept: boolean; autoAcceptFrom: string | null; autoAcceptTo: string | null }) =>
+      m.autoAccept && ((!m.autoAcceptFrom || !m.autoAcceptTo)
+        ? true
+        : (req.body.startTime >= m.autoAcceptFrom && req.body.endTime <= m.autoAcceptTo));
+    const subPool = poolType === 'AUTO_ACCEPT' ? pool.filter(covers) : pool.filter((m) => !covers(m));
+
+    if (subPool.length === 0) {
+      res.status(409).json({ error: 'NO_MAIDS_AVAILABLE', poolType });
+      return;
+    }
+
+    // Strip any client-supplied identity/control fields — the server assigns the maid.
+    const { maidId, poolType: _pt, idempotencyKey: _ik, preferredMaidId: _pm, ...bookingParams } = req.body;
+
+    const result = await db.assignAnyMaid({ poolType, pool: subPool, bookingParams, idempotencyKey });
+    if (!result) {
+      res.status(409).json({ error: 'NO_MAIDS_AVAILABLE', poolType });
+      return;
+    }
+
+    const { booking, maidId: assignedMaidId, maidName } = result;
+    const info = await db.getNotificationInfoForBooking(booking.id);
+
+    if (booking.status === BookingStatus.CONFIRMED) {
+      // Auto-accept pool — the maid is revealed; household gets the confirmation.
+      if (info?.householdPushToken) {
+        sendLocalizedNotification(
+          info.householdPushToken,
+          info.householdPreferredLocale,
+          'booking.requestSentAutoAccept',
+          { maidName: maidName || info.maidName, date: booking.workStartDate, time: booking.startTime },
+          { type: 'booking', id: booking.id },
+        );
+      }
+    } else {
+      // Manual pool — REQUESTED. Notify the assigned maid; the household sees a nameless "matching…".
+      const maidInfo = await db.getUserPushInfo(assignedMaidId);
+      if (maidInfo?.pushToken) {
+        sendLocalizedNotification(
+          maidInfo.pushToken,
+          maidInfo.preferredLocale,
+          'booking.newRequest',
+          { householdName: info?.householdName || 'A household', date: booking.workStartDate, time: booking.startTime },
+          { type: 'booking_request', id: booking.id },
+        );
+      }
+      if (info?.householdPushToken) {
+        sendLocalizedNotification(
+          info.householdPushToken,
+          info.householdPreferredLocale,
+          'booking.anyMaidMatching',
+          { date: booking.workStartDate, time: booking.startTime },
+          { type: 'booking', id: booking.id },
+        );
+      }
+    }
+
+    // Redact the assigned maid from the household's own response while still REQUESTED.
+    res.status(201).json(redactMatchingMaid(booking, 'HOUSEHOLD'));
+  } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -515,6 +646,10 @@ router.put('/:id/assign-replacement', async (req: Request, res: Response) => {
 
     res.json({ success: true, newBookingId: result.newBookingId });
   } catch (e: any) {
+    if (isMaidSlotConflict(e)) {
+      res.status(409).json({ error: 'This maid is no longer available for the selected time.' });
+      return;
+    }
     res.status(500).json({ error: e.message });
   }
 });
@@ -585,6 +720,16 @@ router.put('/:id/status', async (req: Request, res: Response) => {
       }
       // Adhoc or Replacement cancellation — status in-place, record stays open
       const cancelledBy = (req.body.cancelledBy as string) || 'MAID';
+
+      // "Any maid" decline: the assigned maid declining a still-REQUESTED any-maid booking must NOT
+      // cancel it — silently re-pick another eligible maid (or cancel only if the pool is exhausted).
+      // Handle this BEFORE the cancel below so the row is never marked CANCELLED on a normal decline.
+      if (cancelledBy !== 'HOUSEHOLD' && booking.status === BookingStatus.REQUESTED && booking.anyMaidPool) {
+        await reassignAndNotify(req.params.id, 'decline');
+        res.json({ success: true, reassigned: true });
+        return;
+      }
+
       const preUpdateStatus = booking.status; // capture before the mutation below
       await db.updateBookingStatus(req.params.id, BookingStatus.CANCELLED, cancelledBy);
 
