@@ -111,4 +111,71 @@ router.get('/privacy', (_req: Request, res: Response) => {
   res.type('html').send(PRIVACY_HTML);
 });
 
+// Public support page, served as a standalone HTML page (no auth, no /api prefix) so it can be
+// used as the App Store / Play Store "Support URL" and linked from inside the app:
+//   https://sevaconnect-api.onrender.com/support
+// NOTE: review the contact email + company details below before publishing.
+const SUPPORT_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="index, follow" />
+  <title>Kamon — Support</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+           max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; color: #1f2937; line-height: 1.6; }
+    h1 { font-size: 28px; margin-bottom: 4px; color: #312e81; }
+    h2 { font-size: 19px; margin-top: 32px; color: #312e81; }
+    .updated { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+    ul { padding-left: 20px; }
+    li { margin: 6px 0; }
+    a { color: #4338ca; }
+    .contact { margin-top: 24px; padding: 16px 20px; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 10px; }
+    footer { margin-top: 40px; font-size: 13px; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Kamon Support</h1>
+  <p class="updated">We're here to help.</p>
+
+  <p>Kamon connects households with trusted local home helpers for one-time and recurring visits.
+  If you need help with your account, a booking, or anything else in the app, please reach out — we
+  aim to respond within 1–2 business days.</p>
+
+  <div class="contact">
+    <strong>Contact us</strong><br />
+    Email: <a href="mailto:info@vikasam.co.uk">info@vikasam.co.uk</a>
+  </div>
+
+  <h2>Common questions</h2>
+  <ul>
+    <li><strong>Booking a helper</strong> — On the home screen, tap a service or "Book Service", choose a
+        date and time, select a helper (or "Any available helper"), and confirm. Your booking then appears
+        under "My Bookings".</li>
+    <li><strong>Verification codes</strong> — When a job starts or ends, a 6-digit code appears on your
+        booking detail screen. Read it aloud to your helper to confirm the visit. It is shown in the app,
+        not sent by SMS.</li>
+    <li><strong>Cancelling or rescheduling</strong> — Open the booking from "My Bookings" to cancel.
+        Please note the cancellation notice period shown in the app.</li>
+    <li><strong>Changing your language</strong> — Kamon is available in English, Hindi, Gujarati, Marathi,
+        Kannada, Telugu, and Tamil. Change it any time from Settings → Language, or on the login screen.</li>
+    <li><strong>Deleting your account</strong> — You can delete your account and personal data from
+        Settings, or by emailing us at the address above.</li>
+  </ul>
+
+  <h2>Report a problem</h2>
+  <p>If something isn't working, email <a href="mailto:info@vikasam.co.uk">info@vikasam.co.uk</a> with a
+  short description and, if possible, your device model and app version (shown in the app's side menu).
+  This helps us resolve the issue faster.</p>
+
+  <footer>© 2026 Kamon. All rights reserved. · <a href="/privacy">Privacy Policy</a></footer>
+</body>
+</html>`;
+
+router.get('/support', (_req: Request, res: Response) => {
+  res.type('html').send(SUPPORT_HTML);
+});
+
 export default router;
