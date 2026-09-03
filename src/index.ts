@@ -1,7 +1,7 @@
 import { app } from './app';
 import cron from 'node-cron';
 import { db } from './services/database';
-import { sweepTimedOutAnyMaid } from './services/anyMaidReassign';
+// import { sweepTimedOutAnyMaid } from './services/anyMaidReassign'; // re-add with the 5-min cron below
 
 const PORT = process.env.PORT || 3001;
 
@@ -38,9 +38,12 @@ app.listen(PORT, () => {
 
   cron.schedule('30 0 * * *', () => { void runNightlyMaintenance('cron'); }, { timezone: 'Asia/Kolkata' });
 
-  // Any-maid accept-timeout re-pick: every 5 min, lease-gated (short TTL so the next tick can re-win).
-  cron.schedule('*/5 * * * *', async () => {
-    const won = await db.tryAcquireCronLease('anymaid_timeout_sweep', 4);
-    if (won) await sweepTimedOutAnyMaid(true);
-  });
+  // Any-maid accept-timeout re-pick DISABLED 2026-09-03 to let Neon autosuspend (cost): this 5-min
+  // heartbeat kept the compute awake ~24/7. The on-fetch fallback (sweepTimedOutAnyMaid runs when a
+  // booking list is loaded) is the real safety net, so timed-out any-maid bookings still get re-picked
+  // on real traffic. To re-enable, uncomment this block AND the import above.
+  // cron.schedule('*/5 * * * *', async () => {
+  //   const won = await db.tryAcquireCronLease('anymaid_timeout_sweep', 4);
+  //   if (won) await sweepTimedOutAnyMaid(true);
+  // });
 });
