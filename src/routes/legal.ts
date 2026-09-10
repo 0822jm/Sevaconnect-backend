@@ -178,4 +178,95 @@ router.get('/support', (_req: Request, res: Response) => {
   res.type('html').send(SUPPORT_HTML);
 });
 
+// Public account-deletion page, served as a standalone HTML page (no auth, no /api prefix) so it
+// can be used as the Play Store "Delete account URL" and linked from inside the app:
+//   https://sevaconnect-api.onrender.com/delete-account
+// NOTE: review the contact email + company details below before publishing.
+const DELETE_ACCOUNT_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="index, follow" />
+  <title>Kamon — Delete Your Account</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+           max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; color: #1f2937; line-height: 1.6; }
+    h1 { font-size: 28px; margin-bottom: 4px; color: #312e81; }
+    h2 { font-size: 19px; margin-top: 32px; color: #312e81; }
+    .updated { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+    ol, ul { padding-left: 20px; }
+    li { margin: 6px 0; }
+    a { color: #4338ca; }
+    .contact { margin-top: 24px; padding: 16px 20px; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 10px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { text-align: left; padding: 8px 10px; border: 1px solid #e5e7eb; font-size: 14px; vertical-align: top; }
+    th { background: #f9fafb; }
+    footer { margin-top: 40px; font-size: 13px; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Delete Your Kamon Account</h1>
+  <p class="updated">Last updated: September 2026</p>
+
+  <p>Kamon lets you request deletion of your account and associated personal data at any time,
+  directly in the app or by email. This page explains how, and exactly what happens to your data.</p>
+
+  <h2>How to request deletion</h2>
+  <ol>
+    <li><strong>In the app (fastest):</strong> Open Kamon → tap the menu → <strong>Settings</strong> →
+        scroll to the bottom → tap <strong>Delete Account</strong> → confirm. Your account and personal
+        data are removed immediately.</li>
+    <li><strong>By email:</strong> If you can't access the app, email
+        <a href="mailto:info@vikasam.co.uk">info@vikasam.co.uk</a> from the address associated with your
+        account (or include your registered phone number/username) and ask us to delete your account. We
+        will action this promptly.</li>
+  </ol>
+
+  <h2>What gets deleted</h2>
+  <p>As soon as a deletion request is confirmed, the following happens immediately — there is no waiting
+  period:</p>
+  <table>
+    <tr><th>Deleted or removed</th><th>Kept</th></tr>
+    <tr>
+      <td>
+        <ul>
+          <li>Name, username, and password</li>
+          <li>Phone number and address</li>
+          <li>Society/community membership</li>
+          <li>Push-notification token</li>
+          <li>Helper skills, availability, and leave records</li>
+          <li>Auto-accept and preferred-helper settings</li>
+          <li>Chat messages you sent</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Records of <em>completed</em> bookings and any ratings/reviews, kept for accounting,
+              dispute resolution, and platform integrity — but no longer linked to your name, phone
+              number, or address (shown as "Deleted User")</li>
+          <li>Any information we're required to retain by law</li>
+        </ul>
+      </td>
+    </tr>
+  </table>
+  <p>Any booking that is still open or in progress at the time of deletion is automatically cancelled.
+  Your account is immediately deactivated and can no longer be logged into or matched with new bookings.</p>
+
+  <h2>Questions</h2>
+  <div class="contact">
+    <strong>Contact us</strong><br />
+    Email: <a href="mailto:info@vikasam.co.uk">info@vikasam.co.uk</a>
+  </div>
+
+  <footer>© 2026 Kamon. All rights reserved. · <a href="/privacy">Privacy Policy</a> ·
+  <a href="/support">Support</a></footer>
+</body>
+</html>`;
+
+router.get('/delete-account', (_req: Request, res: Response) => {
+  res.type('html').send(DELETE_ACCOUNT_HTML);
+});
+
 export default router;
