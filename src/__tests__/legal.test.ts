@@ -64,8 +64,63 @@ describe('public legal/support pages', () => {
     expect(res.text).toContain('<html lang="ta">');
   });
 
+  it('?lang takes precedence over the Accept-Language header', async () => {
+    // Query param wins even when the header asks for a different supported language.
+    const res = await request(app).get('/privacy?lang=hi').set('Accept-Language', 'ta-IN,ta;q=0.9');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<html lang="hi">');
+  });
+
+  it('normalises the ?lang value (uppercase / surrounding whitespace)', async () => {
+    const res = await request(app).get('/privacy?lang=%20HI%20'); // " HI " → hi
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<html lang="hi">');
+  });
+
+  it('falls through to Accept-Language when ?lang is unsupported', async () => {
+    // Unsupported query param must not short-circuit to English if the header offers a supported one.
+    const res = await request(app).get('/privacy?lang=fr').set('Accept-Language', 'gu-IN,gu;q=0.9');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<html lang="gu">');
+  });
+
+  it('defaults to English when neither ?lang nor Accept-Language is usable', async () => {
+    const res = await request(app).get('/privacy').set('Accept-Language', 'fr-FR,fr;q=0.9');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<html lang="en">');
+  });
+
+  // NOTE: the string "auth-note" also appears in the CSS (.auth-note {...}) on every page, so we
+  // assert on the rendered paragraph markup `class="auth-note"`, which is only emitted when the
+  // note itself is rendered — otherwise these pass trivially off the stylesheet.
   it('the privacy page carries the English-authoritative note', async () => {
     const res = await request(app).get('/privacy?lang=hi');
-    expect(res.text).toContain('auth-note');
+    expect(res.text).toContain('class="auth-note"');
+  });
+
+  it('the delete-account page carries the English-authoritative note', async () => {
+    const res = await request(app).get('/delete-account?lang=hi');
+    expect(res.text).toContain('class="auth-note"');
+  });
+
+  it('the support page does NOT carry the authoritative note', async () => {
+    // The note is only appended to privacy + delete-account, not support.
+    const res = await request(app).get('/support?lang=hi');
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('class="auth-note"');
+  });
+
+  it('marks the active language in the switcher and links the others', async () => {
+    const res = await request(app).get('/privacy?lang=hi');
+    // active locale rendered as a non-link current marker...
+    expect(res.text).toContain('lang-current');
+    // ...and other locales are switch links pointing back at this page with ?lang=
+    expect(res.text).toContain('/privacy?lang=en');
+    expect(res.text).toContain('/privacy?lang=gu');
+  });
+
+  it('sets Vary: Accept-Language so caches key on language negotiation', async () => {
+    const res = await request(app).get('/privacy');
+    expect(res.headers['vary']).toMatch(/Accept-Language/i);
   });
 });
