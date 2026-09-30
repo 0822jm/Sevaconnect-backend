@@ -19,6 +19,7 @@ jest.mock('@neondatabase/serverless', () => ({ neon: () => mockSql }));
 jest.mock('../twilio', () => ({ formatPhoneE164: (p: string) => p }));
 
 import { db } from '../database';
+import { hashPassword, isScryptHash, verifyPin } from '../../utils/helpers';
 
 // The write goes through the direct-call form: sql(`UPDATE users SET ...`, [id, ...values]).
 // Tagged-template reads (getUserById) pass an array as the first arg, so filtering on a
@@ -42,5 +43,26 @@ describe('db.updateUser — clearing the preferred maid', () => {
     expect(call).toBeDefined();
     expect(call![0]).toContain('name =');
     expect(call![0]).not.toContain('preferred_maid_id'); // undefined → not written
+  });
+});
+
+describe('db.updateUser — password_hash wrapping (scrypt)', () => {
+  it('wraps a client-sent sha256 password_hash in salted scrypt before storing', async () => {
+    const sha = await hashPassword('123456'); // what the mobile change-PIN flow sends
+    await db.updateUser('u1', { password_hash: sha } as any);
+    const call = updateCall();
+    expect(call).toBeDefined();
+    const stored = (call![1] as any[]).find((v) => typeof v === 'string' && v.startsWith('scrypt$'));
+    expect(stored).toBeDefined();
+    expect(isScryptHash(stored)).toBe(true);
+    expect(stored).not.toBe(sha);                 // never store the bare sha256
+    expect(await verifyPin(sha, stored)).toBe(true); // and it verifies
+  });
+
+  it('does not double-wrap an already-scrypt password_hash', async () => {
+    const already = 'scrypt$16384$8$1$' + 'aa'.repeat(16) + '$' + 'bb'.repeat(64);
+    await db.updateUser('u1', { password_hash: already } as any);
+    const call = updateCall();
+    expect(call![1]).toContain(already); // stored as-is, not re-wrapped
   });
 });

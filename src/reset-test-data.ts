@@ -21,7 +21,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { Pool } from '@neondatabase/serverless';
-import { hashPassword } from './utils/helpers';
+import { hashPassword, hashPin } from './utils/helpers';
 
 const PIN = '123456';
 
@@ -154,7 +154,7 @@ async function reset() {
 
     // ─── Phase 5: seed users with hashed PIN ───────────────────────────
     console.log('\nStep 7: Insert 18 users (PIN=123456 for everyone)');
-    const pinHash = await hashPassword(PIN);
+    const pinHash = await hashPin(await hashPassword(PIN));
 
     for (const u of USERS) {
       const skills = u.role === 'MAID' && u.societyId

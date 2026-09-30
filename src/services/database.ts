@@ -1,5 +1,5 @@
 import { neon } from '@neondatabase/serverless';
-import { generateId, hashPassword } from '../utils/helpers';
+import { generateId, hashPassword, hashPin, verifyPin, isScryptHash } from '../utils/helpers';
 import { formatPhoneE164 } from './twilio';
 import { pickWeighted } from '../utils/weightedPick';
 
@@ -462,8 +462,12 @@ export const db = {
     if (rows.length > 0) {
       const user = rows[0];
       if (password) {
-        const inputHash = await hashPassword(password);
-        if (user.password_hash && user.password_hash !== inputHash) return null;
+        // Accounts with no usable credential (e.g. scrubbed soft-deleted rows,
+        // already excluded by deleted_at IS NULL) can never authenticate.
+        if (!user.password_hash) return null;
+        const credential = await hashPassword(password); // sha256(pin)
+        const ok = await verifyPin(credential, user.password_hash);
+        if (!ok) return null;
       }
       return mapUser(user);
     }
@@ -527,7 +531,20 @@ export const db = {
       return existing;
     }
 
-    const dbUpdates = entries.map(([key, v]) => [key.replace(/[A-Z]/g, (l: string) => `_${l.toLowerCase()}`), v]);
+    // The mobile change-PIN flow sends password_hash = sha256(pin) (client-side).
+    // Wrap it in salted scrypt before storing so the at-rest format matches every
+    // other path. Guard on isScryptHash so an already-wrapped value is never
+    // double-hashed.
+    const processed = await Promise.all(
+      entries.map(async ([key, v]) => {
+        if (key === 'password_hash' && typeof v === 'string' && v && !isScryptHash(v)) {
+          return [key, await hashPin(v)] as [string, unknown];
+        }
+        return [key, v] as [string, unknown];
+      })
+    );
+
+    const dbUpdates = processed.map(([key, v]) => [key.replace(/[A-Z]/g, (l: string) => `_${l.toLowerCase()}`), v]);
     const setClause = dbUpdates.map(([k, _], i) => `${k} = $${i + 2}`).join(', ');
 
     await (sql as any)(
@@ -589,7 +606,7 @@ export const db = {
     }
 
     const id = generateId('u');
-    const passwordHash = user.password ? await hashPassword(user.password) : '';
+    const passwordHash = user.password ? await hashPin(await hashPassword(user.password)) : '';
     await sql`INSERT INTO users (id, name, username, password_hash, role, society_id, is_verified, phone, address, skills, must_change_password, auto_accept, auto_accept_from, auto_accept_to, preferred_locale)
        VALUES (${id}, ${user.name}, ${username}, ${passwordHash}, ${user.role}, ${user.societyId}, ${user.isVerified || false}, ${phone}, ${user.address || null}, ${user.skills || []}, FALSE, ${user.autoAccept || false}, ${user.autoAcceptFrom || null}, ${user.autoAcceptTo || null}, ${user.preferredLocale || null})`;
     return id;
@@ -969,7 +986,7 @@ export const db = {
     const socId = generateId('soc');
     const adminId = generateId('u');
     const initialPassword = society.initialPassword || Math.random().toString(36).slice(-8);
-    const passwordHash = await hashPassword(initialPassword);
+    const passwordHash = await hashPin(await hashPassword(initialPassword));
 
     // Resolve the admin's display name and login username. Both are now
     // explicit fields collected at onboarding. Fall back to legacy auto-values
@@ -1024,7 +1041,7 @@ export const db = {
     if (rows.length === 0) throw new Error('No society admin found for this society.');
     const adminUser = rows[0];
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
-    const passwordHash = await hashPassword(pin);
+    const passwordHash = await hashPin(await hashPassword(pin));
     await sql`
       UPDATE users SET password_hash = ${passwordHash}, must_change_password = TRUE
       WHERE id = ${adminUser.id}
