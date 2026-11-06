@@ -29,9 +29,21 @@ export const formatPhoneE164 = (phone: string): string => {
   return `+${digits}`;
 };
 
-export const startTwilioVerify = async (to: string): Promise<VerifyResponse> => {
+// Locales Twilio Verify ships a DEFAULT SMS template for. Gujarati and Tamil are only
+// available through a custom template, and requesting a locale with no template returns a
+// 404, so those (and English, the default) are sent with no Locale and arrive in English.
+const VERIFY_SMS_LOCALES = new Set(['hi', 'kn', 'mr', 'te']);
+
+export const verifyLocaleFor = (locale?: string): string | undefined =>
+  locale && VERIFY_SMS_LOCALES.has(locale) ? locale : undefined;
+
+export const startTwilioVerify = async (to: string, locale?: string): Promise<VerifyResponse> => {
   const config = getConfig();
   const targetPhone = config.demoPhone || to;
+
+  const params = new URLSearchParams({ To: targetPhone, Channel: 'sms' });
+  const verifyLocale = verifyLocaleFor(locale);
+  if (verifyLocale) params.set('Locale', verifyLocale);
 
   try {
     const response = await fetch(
@@ -42,7 +54,7 @@ export const startTwilioVerify = async (to: string): Promise<VerifyResponse> => 
           Authorization: 'Basic ' + Buffer.from(`${config.accountSid}:${config.authToken}`).toString('base64'),
           'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: new URLSearchParams({ To: targetPhone, Channel: 'sms' }),
+        body: params,
       }
     );
 

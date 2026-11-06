@@ -33,7 +33,7 @@ router.post('/login', async (req: Request, res: Response) => {
 // POST /api/auth/register/send-otp — validate fields + send Twilio OTP
 router.post('/register/send-otp', async (req: Request, res: Response) => {
   try {
-    const { phone, name, username, role, societyId } = req.body;
+    const { phone, name, username, role, societyId, locale } = req.body;
     console.log('[Register Send OTP] Received body:', JSON.stringify(req.body));
     const missingOtp = [!phone && 'phone', !name && 'name', !username && 'username', !role && 'role', !societyId && 'societyId'].filter(Boolean);
     if (missingOtp.length > 0) {
@@ -70,7 +70,7 @@ router.post('/register/send-otp', async (req: Request, res: Response) => {
     }
 
     const formattedPhone = formatPhoneE164(phone);
-    const result = await startTwilioVerify(formattedPhone);
+    const result = await startTwilioVerify(formattedPhone, locale);
     if (result.success) {
       console.log(`[Register OTP] Verification sent to ${formattedPhone} for ${name}`);
       res.json({ success: true, message: 'Verification code sent via SMS' });
@@ -130,7 +130,7 @@ router.post('/register', async (req: Request, res: Response) => {
 // POST /api/auth/forgot-password
 router.post('/forgot-password', async (req: Request, res: Response) => {
   try {
-    const { username } = req.body;
+    const { username, locale } = req.body;
     if (!username) {
       res.status(400).json({ error: 'Username is required' });
       return;
@@ -144,7 +144,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 
     // Use the same E.164-formatted number for sending AND checking (see /verify-otp),
     // otherwise Twilio Verify can't match the code back to this verification.
-    const result = await startTwilioVerify(formatPhoneE164(phone));
+    const result = await startTwilioVerify(formatPhoneE164(phone), locale);
     if (result.success) {
       res.json({ success: true, message: 'Verification code sent via SMS' });
     } else {

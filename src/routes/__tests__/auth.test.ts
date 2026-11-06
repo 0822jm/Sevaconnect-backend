@@ -103,7 +103,16 @@ describe('POST /api/auth/register/send-otp', () => {
     const res = await request(app).post('/api/auth/register/send-otp').send(validBody);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, message: 'Verification code sent via SMS' });
-    expect(startTwilioVerify).toHaveBeenCalledWith('+919876543210');
+    expect(startTwilioVerify).toHaveBeenCalledWith('+919876543210', undefined);
+  });
+
+  it('passes the requested locale through to Twilio Verify', async () => {
+    (db.isPhoneRegistered as jest.Mock).mockResolvedValue(false);
+    (formatPhoneE164 as jest.Mock).mockImplementation((p: string) => `+91${p}`);
+    (startTwilioVerify as jest.Mock).mockResolvedValue({ success: true });
+    const res = await request(app).post('/api/auth/register/send-otp').send({ ...validBody, locale: 'hi' });
+    expect(res.status).toBe(200);
+    expect(startTwilioVerify).toHaveBeenCalledWith('+919876543210', 'hi');
   });
 });
 
@@ -178,6 +187,14 @@ describe('POST /api/auth/forgot-password', () => {
     const res = await request(app).post('/api/auth/forgot-password').send({ username: 'jane1' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, message: 'Verification code sent via SMS' });
+  });
+
+  it('passes the requested locale through to Twilio Verify', async () => {
+    (db.getUserPhoneByUsername as jest.Mock).mockResolvedValue('9876543210');
+    (startTwilioVerify as jest.Mock).mockResolvedValue({ success: true });
+    const res = await request(app).post('/api/auth/forgot-password').send({ username: 'jane1', locale: 'te' });
+    expect(res.status).toBe(200);
+    expect(startTwilioVerify).toHaveBeenCalledWith('9876543210', 'te');
   });
 });
 
